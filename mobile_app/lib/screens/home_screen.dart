@@ -1,32 +1,52 @@
 import 'dart:async';
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
+
+import '../models/camera_frame_data.dart';
 import '../models/imu_data.dart';
 import '../models/sensor_data.dart';
-import '../models/camera_frame_data.dart';
 import '../services/api_service.dart';
 import '../services/camera_service.dart';
 import '../services/sensor_service.dart';
 
-/// Main home screen of the ETA-Sync application
-/// Provides UI for streaming mode selection, server configuration, and data capture control
+enum HomeMode {
+  stream,
+  sync,
+}
+
+/// Main home screen of the ETA-Sync application.
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({Key? key}) : super(key: key);
+  const HomeScreen({super.key});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  static const List<String> _backendRequirements = [
+    'Maintain a per-session rolling synchronized cache for the latest 120 seconds.',
+    'Expose GET /sync/status?session_id=... with readiness and available replay seconds.',
+    'Expose GET /sync/latest?session_id=...&offset_seconds=0..120 for fused playback.',
+    'Return session_id, server_timestamp, window_start, window_end, prediction, confidence_score, all_probabilities, imu_summary or sampled aligned IMU packets, optional frame preview, dtw_distance, and alignment_path.',
+    'Keep /imu, /frame, /ws/diagnostics, and existing dashboard events unchanged.',
+    'Reuse the existing session, WindowBuffer, fusion output, and artifact model instead of creating a parallel pipeline.',
+  ];
+
   final _serverUrlController = TextEditingController();
   final _sensorService = SensorService();
   final _cameraService = CameraService();
   final _apiService = ApiService();
 
+  HomeMode _mode = HomeMode.stream;
   bool _isStreaming = false;
-  String _statusMessage = 'Not connected';
   bool _isConnected = false;
+  bool _streamCamera = true;
+  bool _streamImu = true;
+  bool _syncApiChecked = false;
+  bool _syncApiAvailable = false;
+  String _statusMessage = 'Not connected';
   int _imuCount = 0;
   int _frameCount = 0;
 
@@ -34,35 +54,28 @@ class _HomeScreenState extends State<HomeScreen> {
   StreamSubscription<SensorData>? _sensorSubscription;
   StreamSubscription<CameraFrameData>? _frameSubscription;
 
+  bool get _hasSelectedStream => _streamCamera || _streamImu;
+
   @override
   void initState() {
     super.initState();
     _initializeServices();
   }
 
-  /// Initializes all services
   Future<void> _initializeServices() async {
     try {
-      // Initialize sensor service
       _sensorService.initialize();
 
-      // Initialize camera service
-      final cameraStatus = await Permission.camera.request();
-      if (!cameraStatus.isGranted) {
-        setState(() {
-          _statusMessage = 'Camera permission is required';
-        });
-        return;
-      }
-
-      await _cameraService.initialize();
-
-      // Subscribe to connection status changes
       _connectionStatusSubscription =
           _apiService.connectionStatusStream.listen((connected) {
+        if (!mounted) return;
         setState(() {
           _isConnected = connected;
           _statusMessage = connected ? 'Connected' : 'Disconnected';
+          if (!connected) {
+            _syncApiChecked = false;
+            _syncApiAvailable = false;
+          }
         });
       });
 
@@ -76,22 +89,21 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  /// Requests camera permission if not already granted
-  Future<bool> _requestPermissions() async {
+  Future<bool> _requestCameraPermission() async {
     var status = await Permission.camera.status;
     if (status.isGranted) return true;
+
     status = await Permission.camera.request();
     if (status.isPermanentlyDenied) {
       _showErrorDialog(
         'Camera permission is permanently denied.\n'
-        'Please enable it in your device Settings ➜ Apps ➜ ETA-Sync ➜ Permissions.',
+        'Please enable it in your device Settings > Apps > ETA-Sync > Permissions.',
       );
       return false;
     }
     return status.isGranted;
   }
 
-  /// Connects to the server using the provided URL
   Future<void> _connectToServer() async {
     String url = _serverUrlController.text.trim();
 
@@ -106,32 +118,44 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() {
       _statusMessage = 'Connecting...';
+      _syncApiChecked = false;
+      _syncApiAvailable = false;
     });
 
     final connected = await _apiService.setServerUrl(url);
 
+    if (!mounted) return;
     if (connected) {
       setState(() {
         _statusMessage = 'Connected';
         _isConnected = true;
       });
       _showSuccessSnackbar('Connected to server');
+      await _checkSyncApiAvailability();
     } else {
       setState(() {
         _statusMessage = 'Connection failed';
         _isConnected = false;
       });
       _showErrorDialog(
-          'Failed to connect to server.\nMake sure the server is running at: $url');
+        'Failed to connect to server.\nMake sure the server is running at: $url',
+      );
     }
   }
 
-  /// Starts streaming sensor and camera data
+  Future<void> _checkSyncApiAvailability() async {
+    if (!_isConnected) return;
+    final available = await _apiService.isSyncPlaybackAvailable();
+    if (!mounted) return;
+    setState(() {
+      _syncApiChecked = true;
+      _syncApiAvailable = available;
+    });
+  }
+
   Future<void> _startStreaming() async {
-    // Check permissions
-    final hasPermissions = await _requestPermissions();
-    if (!hasPermissions) {
-      _showErrorDialog('Camera permission is required to start streaming.');
+    if (!_hasSelectedStream) {
+      _showErrorDialog('Select Camera, IMU, or both before starting.');
       return;
     }
 
@@ -141,61 +165,76 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     try {
-      if (!_cameraService.isInitialized) {
-        await _cameraService.initialize();
+      if (_streamCamera) {
+        final hasPermission = await _requestCameraPermission();
+        if (!hasPermission) {
+          _showErrorDialog(
+              'Camera permission is required for camera streaming.');
+          return;
+        }
+
+        if (!_cameraService.isInitialized) {
+          await _cameraService.initialize();
+        }
       }
 
       await _sensorSubscription?.cancel();
       await _frameSubscription?.cancel();
+      _sensorSubscription = null;
+      _frameSubscription = null;
 
       setState(() {
         _isStreaming = true;
         _imuCount = 0;
         _frameCount = 0;
-        _statusMessage = 'Streaming...';
+        _statusMessage = _streamLabel();
       });
 
-      // Subscribe before starting the frame stream so early frames are not lost.
-      _sensorSubscription = _sensorService.sensorStream.listen(
-        (sensorData) => _handleSensorData(sensorData),
-        onError: (error) {
-          print('Sensor error: $error');
-          _stopStreaming();
-        },
-      );
+      if (_streamImu) {
+        _sensorSubscription = _sensorService.sensorStream.listen(
+          (sensorData) => _handleSensorData(sensorData),
+          onError: (error) {
+            debugPrint('Sensor error: $error');
+            _stopStreaming();
+          },
+        );
+      }
 
-      _frameSubscription = _cameraService.frameStream?.listen(
-        (frameData) => _handleCameraFrame(frameData),
-        onError: (error) {
-          print('Camera error: $error');
-          _stopStreaming();
-        },
-      );
-
-      await _cameraService.startCapturing(fps: 5);
+      if (_streamCamera) {
+        _frameSubscription = _cameraService.frameStream?.listen(
+          (frameData) => _handleCameraFrame(frameData),
+          onError: (error) {
+            debugPrint('Camera error: $error');
+            _stopStreaming();
+          },
+        );
+        await _cameraService.startCapturing(fps: 5);
+      }
     } catch (e) {
       _showErrorDialog('Error starting stream: $e');
+      if (!mounted) return;
       setState(() {
         _isStreaming = false;
       });
     }
   }
 
-  /// Stops streaming sensor and camera data
   void _stopStreaming() {
     _sensorSubscription?.cancel();
     _frameSubscription?.cancel();
+    _sensorSubscription = null;
+    _frameSubscription = null;
     _cameraService.stopCapturing();
 
+    if (!mounted) return;
     setState(() {
       _isStreaming = false;
       _statusMessage = 'Stopped';
     });
   }
 
-  /// Handles incoming sensor data
-  void _handleSensorData(SensorData sensorData) async {
-    if (!_isStreaming) {
+  Future<void> _handleSensorData(SensorData sensorData) async {
+    if (!_isStreaming || !_streamImu) {
       return;
     }
 
@@ -211,37 +250,41 @@ class _HomeScreenState extends State<HomeScreen> {
 
     await _apiService.sendImuData(imuData.toJson());
 
+    if (!mounted || !_isStreaming) return;
     setState(() {
       _imuCount++;
-      _statusMessage = 'Streaming - IMU: $_imuCount, Frames: $_frameCount';
+      _statusMessage = _streamLabel();
     });
   }
 
-  /// Handles incoming camera frames
-  void _handleCameraFrame(CameraFrameData frameData) async {
-    if (!_isStreaming) {
+  Future<void> _handleCameraFrame(CameraFrameData frameData) async {
+    if (!_isStreaming || !_streamCamera) {
       return;
     }
-
-    // Convert frame data to base64 for transmission
-    final base64Frame = base64Encode(frameData.jpegData);
 
     final frameJson = {
       'timestamp': frameData.timestamp,
       'frame_id': frameData.frameId,
       'resolution': frameData.resolution,
-      'data': base64Frame,
+      'data': base64Encode(frameData.jpegData),
     };
 
     await _apiService.sendCameraFrame(frameJson);
 
+    if (!mounted || !_isStreaming) return;
     setState(() {
       _frameCount++;
-      _statusMessage = 'Streaming - IMU: $_imuCount, Frames: $_frameCount';
+      _statusMessage = _streamLabel();
     });
   }
 
-  /// Shows an error dialog
+  String _streamLabel() {
+    final parts = <String>[];
+    if (_streamImu) parts.add('IMU: $_imuCount');
+    if (_streamCamera) parts.add('Frames: $_frameCount');
+    return 'Streaming - ${parts.join(', ')}';
+  }
+
   void _showErrorDialog(String message) {
     showDialog(
       context: context,
@@ -258,7 +301,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// Shows a success snackbar
   void _showSuccessSnackbar(String message) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -296,113 +338,332 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             _buildHeroStatusCard(theme, colorScheme),
             const SizedBox(height: 16),
-            _buildSectionCard(
-              title: 'Server Configuration',
-              icon: Icons.cloud_outlined,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  TextField(
-                    controller: _serverUrlController,
-                    decoration: InputDecoration(
-                      hintText: '192.168.1.10:8000',
-                      labelText: 'Server Address',
-                      prefixIcon: const Icon(Icons.language),
-                      suffixIcon: _isConnected
-                          ? Icon(
-                              Icons.verified_rounded,
-                              color: colorScheme.primary,
-                            )
-                          : null,
-                    ),
-                    enabled: !_isStreaming,
-                  ),
-                  const SizedBox(height: 12),
-                  FilledButton.icon(
-                    onPressed: _isStreaming ? null : _connectToServer,
-                    icon: const Icon(Icons.wifi_find),
-                    label: const Text('Connect to Server'),
-                  ),
-                ],
-              ),
-            ),
+            _buildModeSelector(colorScheme),
             const SizedBox(height: 16),
-            _buildSectionCard(
-              title: 'Data Collection',
-              icon: Icons.sensors_rounded,
-              child: Row(
-                children: [
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: !_isConnected || _isStreaming
+            _buildServerConfiguration(colorScheme),
+            const SizedBox(height: 16),
+            if (_mode == HomeMode.stream) ...[
+              _buildStreamControls(theme, colorScheme),
+              const SizedBox(height: 16),
+              _buildSessionStatistics(theme, colorScheme),
+            ] else ...[
+              _buildSyncPlayback(theme, colorScheme),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildModeSelector(ColorScheme colorScheme) {
+    return SegmentedButton<HomeMode>(
+      segments: const [
+        ButtonSegment<HomeMode>(
+          value: HomeMode.stream,
+          icon: Icon(Icons.sensors_rounded),
+          label: Text('Stream Sensor Data'),
+        ),
+        ButtonSegment<HomeMode>(
+          value: HomeMode.sync,
+          icon: Icon(Icons.video_library_rounded),
+          label: Text('Get Sync Stream'),
+        ),
+      ],
+      selected: {_mode},
+      onSelectionChanged: _isStreaming
+          ? null
+          : (selection) {
+              setState(() {
+                _mode = selection.first;
+              });
+              if (selection.first == HomeMode.sync && _isConnected) {
+                _checkSyncApiAvailability();
+              }
+            },
+    );
+  }
+
+  Widget _buildServerConfiguration(ColorScheme colorScheme) {
+    return _buildSectionCard(
+      title: 'Server Configuration',
+      icon: Icons.cloud_outlined,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextField(
+            controller: _serverUrlController,
+            decoration: InputDecoration(
+              hintText: '192.168.1.10:8000',
+              labelText: 'Server Address',
+              prefixIcon: const Icon(Icons.language),
+              suffixIcon: _isConnected
+                  ? Icon(
+                      Icons.verified_rounded,
+                      color: colorScheme.primary,
+                    )
+                  : null,
+            ),
+            enabled: !_isStreaming,
+          ),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: _isStreaming ? null : _connectToServer,
+            icon: const Icon(Icons.wifi_find),
+            label: const Text('Connect to Server'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStreamControls(ThemeData theme, ColorScheme colorScheme) {
+    return _buildSectionCard(
+      title: 'Stream Sensor Data',
+      icon: Icons.podcasts_rounded,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          CheckboxListTile(
+            value: _streamCamera,
+            onChanged: _isStreaming
+                ? null
+                : (value) {
+                    setState(() {
+                      _streamCamera = value ?? false;
+                    });
+                  },
+            secondary: const Icon(Icons.photo_camera_front_rounded),
+            title: const Text('Camera'),
+            subtitle: const Text('Send JPEG frames to /frame'),
+            contentPadding: EdgeInsets.zero,
+          ),
+          CheckboxListTile(
+            value: _streamImu,
+            onChanged: _isStreaming
+                ? null
+                : (value) {
+                    setState(() {
+                      _streamImu = value ?? false;
+                    });
+                  },
+            secondary: const Icon(Icons.sensors_rounded),
+            title: const Text('IMU'),
+            subtitle:
+                const Text('Send accelerometer and gyroscope samples to /imu'),
+            contentPadding: EdgeInsets.zero,
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed:
+                      !_isConnected || _isStreaming || !_hasSelectedStream
                           ? null
                           : _startStreaming,
-                      icon: const Icon(Icons.play_arrow_rounded),
-                      label: const Text('Start'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: !_isStreaming ? null : _stopStreaming,
-                      icon: const Icon(Icons.stop_rounded),
-                      label: const Text('Stop'),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            _buildSectionCard(
-              title: 'Session Statistics',
-              icon: Icons.insights_rounded,
-              child: Column(
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _buildStatTile(
-                          theme,
-                          icon: Icons.sensors_rounded,
-                          label: 'IMU Samples',
-                          value: _imuCount.toString(),
-                          tint: colorScheme.primary,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: _buildStatTile(
-                          theme,
-                          icon: Icons.photo_camera_front_rounded,
-                          label: 'Frames',
-                          value: _frameCount.toString(),
-                          tint: colorScheme.secondary,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            _buildSectionCard(
-              title: 'How to Use',
-              icon: Icons.info_outline_rounded,
-              child: Text(
-                '1. Enter the FastAPI server IP address and port.\n'
-                '2. Tap Connect to verify connectivity.\n'
-                '3. Tap Start to stream sensor and camera data.\n'
-                '4. Move and rotate device for diverse samples.\n'
-                '5. Tap Stop to end the session.',
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  height: 1.55,
-                  color: colorScheme.onSurfaceVariant,
+                  icon: const Icon(Icons.play_arrow_rounded),
+                  label: const Text('Start'),
                 ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: !_isStreaming ? null : _stopStreaming,
+                  icon: const Icon(Icons.stop_rounded),
+                  label: const Text('Stop'),
+                ),
+              ),
+            ],
+          ),
+          if (!_hasSelectedStream) ...[
+            const SizedBox(height: 10),
+            Text(
+              'Select at least one stream source.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: colorScheme.error,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSessionStatistics(ThemeData theme, ColorScheme colorScheme) {
+    final inactive = colorScheme.onSurfaceVariant;
+    return _buildSectionCard(
+      title: 'Session Statistics',
+      icon: Icons.insights_rounded,
+      child: Row(
+        children: [
+          Expanded(
+            child: _buildStatTile(
+              theme,
+              icon: Icons.sensors_rounded,
+              label: 'IMU Samples',
+              value: _streamImu ? _imuCount.toString() : 'Off',
+              tint: _streamImu ? colorScheme.primary : inactive,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: _buildStatTile(
+              theme,
+              icon: Icons.photo_camera_front_rounded,
+              label: 'Frames',
+              value: _streamCamera ? _frameCount.toString() : 'Off',
+              tint: _streamCamera ? colorScheme.secondary : inactive,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSyncPlayback(ThemeData theme, ColorScheme colorScheme) {
+    final unavailable = !_syncApiAvailable;
+
+    return _buildSectionCard(
+      title: 'Get Sync Stream',
+      icon: Icons.video_library_rounded,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              color:
+                  colorScheme.surfaceContainerHighest.withValues(alpha: 0.55),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      unavailable
+                          ? Icons.hourglass_disabled_rounded
+                          : Icons.play_circle_rounded,
+                      color:
+                          unavailable ? colorScheme.error : colorScheme.primary,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        unavailable
+                            ? 'Backend sync playback API not available'
+                            : 'Sync playback ready',
+                        style: theme.textTheme.titleMedium,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  unavailable
+                      ? 'This screen is ready for a fused, synchronized two-minute playback stream once the backend exposes the required read-only sync endpoints.'
+                      : 'Use the timeline to inspect synchronized fused windows from the latest two minutes.',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                    height: 1.45,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          _buildDisabledTimeline(theme, colorScheme),
+          const SizedBox(height: 16),
+          FilledButton.tonalIcon(
+            onPressed: _isConnected ? _checkSyncApiAvailability : null,
+            icon: const Icon(Icons.refresh_rounded),
+            label:
+                Text(_syncApiChecked ? 'Recheck Sync API' : 'Check Sync API'),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'Backend requirements',
+            style: theme.textTheme.titleMedium,
+          ),
+          const SizedBox(height: 8),
+          ..._backendRequirements.map(
+            (requirement) => Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(top: 7),
+                    child: Icon(
+                      Icons.circle,
+                      size: 6,
+                      color: colorScheme.primary,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      requirement,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                        height: 1.35,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDisabledTimeline(ThemeData theme, ColorScheme colorScheme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            IconButton.filledTonal(
+              onPressed: null,
+              icon: const Icon(Icons.replay_10_rounded),
+              tooltip: 'Move back 10 seconds',
+            ),
+            Expanded(
+              child: Slider(
+                value: 120,
+                min: 0,
+                max: 120,
+                onChanged: null,
+              ),
+            ),
+            IconButton.filledTonal(
+              onPressed: null,
+              icon: const Icon(Icons.play_arrow_rounded),
+              tooltip: 'Play synchronized stream',
+            ),
+          ],
+        ),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              '-2:00',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+              ),
+            ),
+            Text(
+              'Live',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: colorScheme.onSurfaceVariant,
               ),
             ),
           ],
         ),
-      ),
+      ],
     );
   }
 
@@ -432,7 +693,7 @@ class _HomeScreenState extends State<HomeScreen> {
             Row(
               children: [
                 CircleAvatar(
-                  backgroundColor: statusColor.withOpacity(0.18),
+                  backgroundColor: statusColor.withValues(alpha: 0.18),
                   foregroundColor: statusColor,
                   child:
                       Icon(_isConnected ? Icons.cloud_done : Icons.cloud_off),
@@ -475,11 +736,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 Chip(
                   avatar: const Icon(Icons.memory_rounded, size: 18),
-                  label: Text('IMU $_imuCount'),
+                  label: Text(_streamImu ? 'IMU $_imuCount' : 'IMU Off'),
                 ),
                 Chip(
                   avatar: const Icon(Icons.image_rounded, size: 18),
-                  label: Text('Frames $_frameCount'),
+                  label: Text(
+                      _streamCamera ? 'Frames $_frameCount' : 'Camera Off'),
+                ),
+                Chip(
+                  avatar: const Icon(Icons.sync_rounded, size: 18),
+                  label:
+                      Text(_syncApiAvailable ? 'Sync Ready' : 'Sync Pending'),
                 ),
               ],
             ),
@@ -504,9 +771,11 @@ class _HomeScreenState extends State<HomeScreen> {
               children: [
                 Icon(icon, size: 20),
                 const SizedBox(width: 8),
-                Text(
-                  title,
-                  style: Theme.of(context).textTheme.titleMedium,
+                Expanded(
+                  child: Text(
+                    title,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
                 ),
               ],
             ),
@@ -529,13 +798,13 @@ class _HomeScreenState extends State<HomeScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(16),
-        color: tint.withOpacity(0.08),
+        color: tint.withValues(alpha: 0.08),
       ),
       child: Row(
         children: [
           CircleAvatar(
             radius: 15,
-            backgroundColor: tint.withOpacity(0.2),
+            backgroundColor: tint.withValues(alpha: 0.2),
             foregroundColor: tint,
             child: Icon(icon, size: 16),
           ),

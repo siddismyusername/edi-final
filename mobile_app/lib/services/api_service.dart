@@ -43,7 +43,8 @@ class ApiService {
       _isConnected = response.statusCode == 200;
 
       if (kDebugMode) {
-        print('[ApiService] Connection test: ${_isConnected ? 'SUCCESS' : 'FAILED'}');
+        print(
+            '[ApiService] Connection test: ${_isConnected ? 'SUCCESS' : 'FAILED'}');
       }
     } catch (e) {
       _isConnected = false;
@@ -144,6 +145,32 @@ class ApiService {
       if (_isConnected) {
         _isConnected = false;
         _connectionStatusController.add(false);
+      }
+      return false;
+    }
+  }
+
+  /// Checks whether the backend exposes the planned sync playback API.
+  Future<bool> isSyncPlaybackAvailable() async {
+    if (!_isConnected || _serverUrl.isEmpty) {
+      return false;
+    }
+
+    try {
+      final response = await http
+          .get(
+            Uri.parse('$_serverUrl/sync/status'),
+          )
+          .timeout(const Duration(seconds: 5));
+
+      if (kDebugMode) {
+        print('[ApiService] Sync status response: ${response.statusCode}');
+      }
+
+      return response.statusCode == 200;
+    } catch (e) {
+      if (kDebugMode) {
+        print('[ApiService] Sync status unavailable: $e');
       }
       return false;
     }

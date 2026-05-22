@@ -1,0 +1,92 @@
+{
+  "accuracy": 1.0,
+  "macro_f1": 1.0,
+  "per_class": {
+    "walking": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 99
+    },
+    "running": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 98
+    },
+    "standing": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 95
+    },
+    "sitting": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 106
+    },
+    "jumping": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 106
+    },
+    "unknown": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 103
+    }
+  },
+  "confusion_matrix": [
+    [
+      99,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      98,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      95,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      106,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      106,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0,
+      103
+    ]
+  ]
+}

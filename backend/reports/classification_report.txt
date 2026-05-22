@@ -6,9 +6,9 @@ Macro avg  P/R/F1: 1.0000 / 1.0000 / 1.0000
 Weighted   P/R/F1: 1.0000 / 1.0000 / 1.0000
 
 Per-class metrics:
--  walking: precision=1.0000, recall=1.0000, f1=1.0000, support=63
--  running: precision=1.0000, recall=1.0000, f1=1.0000, support=61
-- standing: precision=1.0000, recall=1.0000, f1=1.0000, support=55
--  sitting: precision=1.0000, recall=1.0000, f1=1.0000, support=88
--  jumping: precision=1.0000, recall=1.0000, f1=1.0000, support=60
--  unknown: precision=1.0000, recall=1.0000, f1=1.0000, support=73
+-  walking: precision=1.0000, recall=1.0000, f1=1.0000, support=64
+-  running: precision=1.0000, recall=1.0000, f1=1.0000, support=73
+- standing: precision=1.0000, recall=1.0000, f1=1.0000, support=66
+-  sitting: precision=1.0000, recall=1.0000, f1=1.0000, support=63
+-  jumping: precision=1.0000, recall=1.0000, f1=1.0000, support=71
+-  unknown: precision=1.0000, recall=1.0000, f1=1.0000, support=63

@@ -14,7 +14,6 @@ ImuData _$ImuDataFromJson(Map<String, dynamic> json) => ImuData(
       gx: (json['gx'] as num).toDouble(),
       gy: (json['gy'] as num).toDouble(),
       gz: (json['gz'] as num).toDouble(),
-      mode: json['mode'] as String,
     );
 
 Map<String, dynamic> _$ImuDataToJson(ImuData instance) => <String, dynamic>{
@@ -25,5 +24,4 @@ Map<String, dynamic> _$ImuDataToJson(ImuData instance) => <String, dynamic>{
       'gx': instance.gx,
       'gy': instance.gy,
       'gz': instance.gz,
-      'mode': instance.mode,
     };

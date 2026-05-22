@@ -1,12 +1,13 @@
 {
-  "timestamp": "2026-05-17T17:23:24.652342Z",
+  "timestamp": "2026-05-21T18:47:25.891056Z",
   "device": "cpu",
-  "checkpoint": "etasync_model.pt",
-  "checkpoint_epoch": 18,
-  "checkpoint_loss": 0.007996910703204414,
-  "num_samples": 400,
-  "batch_size": 8,
-  "accuracy": 1.0,
-  "macro_f1": 1.0,
-  "reports_dir": "/home/siddharth/Study/sem-4/EDI/final/backend/reports"
+  "checkpoint": "etasync_v2_best.pt",
+  "checkpoint_epoch": 16,
+  "accuracy": 0.912,
+  "macro_f1": 0.9167656631696354,
+  "avg_confidence": 0.748320977807045,
+  "avg_latency_sec": 0.017818833154345317,
+  "max_latency_sec": 0.061199188232421875,
+  "latency_std_sec": 0.005857878597093882,
+  "num_samples": 500
 }

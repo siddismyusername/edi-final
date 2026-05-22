@@ -27,9 +27,6 @@ class ImuData {
   /// Gyroscope Z-axis reading in rad/s
   final double gz;
 
-  /// Streaming mode: "sync" or "async"
-  final String mode;
-
   /// Creates an IMU data instance
   ImuData({
     required this.timestamp,
@@ -39,7 +36,6 @@ class ImuData {
     required this.gx,
     required this.gy,
     required this.gz,
-    required this.mode,
   });
 
   /// Converts IMU data to JSON
@@ -51,5 +47,5 @@ class ImuData {
 
   @override
   String toString() =>
-      'ImuData(ts: $timestamp, ax: $ax, ay: $ay, az: $az, gx: $gx, gy: $gy, gz: $gz, mode: $mode)';
+      'ImuData(ts: $timestamp, ax: $ax, ay: $ay, az: $az, gx: $gx, gy: $gy, gz: $gz)';
 }

@@ -12,37 +12,37 @@
       "precision": 1.0,
       "recall": 1.0,
       "f1_score": 1.0,
-      "support": 63
+      "support": 64
     },
     "running": {
       "precision": 1.0,
       "recall": 1.0,
       "f1_score": 1.0,
-      "support": 61
+      "support": 73
     },
     "standing": {
       "precision": 1.0,
       "recall": 1.0,
       "f1_score": 1.0,
-      "support": 55
+      "support": 66
     },
     "sitting": {
       "precision": 1.0,
       "recall": 1.0,
       "f1_score": 1.0,
-      "support": 88
+      "support": 63
     },
     "jumping": {
       "precision": 1.0,
       "recall": 1.0,
       "f1_score": 1.0,
-      "support": 60
+      "support": 71
     },
     "unknown": {
       "precision": 1.0,
       "recall": 1.0,
       "f1_score": 1.0,
-      "support": 73
+      "support": 63
     }
   },
   "macro_avg": {

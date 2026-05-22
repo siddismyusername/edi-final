@@ -15,7 +15,7 @@ dependencies:
   cupertino_icons: ^1.0.8
 
   # Sensor data capture
-  sensors_plus: ^1.4.0
+  sensors_plus: ^6.1.2
 
   # Camera frame capture
   camera: ^0.10.0

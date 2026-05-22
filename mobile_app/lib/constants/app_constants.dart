@@ -42,16 +42,6 @@ class AppConstants {
   /// JPEG compression quality (0-100)
   static const int jpegQuality = 80;
 
-  // ==================== Streaming Configuration ====================
-  /// Delay for async mode in milliseconds (simulates sensor asynchrony)
-  static const int asyncModeDelayMs = 200;
-
-  /// Streaming mode constant: synchronous
-  static const String streamingModeSynchronous = 'sync';
-
-  /// Streaming mode constant: asynchronous
-  static const String streamingModeAsynchronous = 'async';
-
   // ==================== UI Constants ====================
   /// Standard padding for UI elements
   static const double standardPadding = 16.0;
@@ -85,11 +75,9 @@ class AppConstants {
   static const String errorServerConnectionFailed =
       'Could not connect to server. Check IP address and network.';
 
-  static const String errorInvalidServerUrl =
-      'Invalid server URL format';
+  static const String errorInvalidServerUrl = 'Invalid server URL format';
 
-  static const String errorDataSendFailed =
-      'Failed to send data to server';
+  static const String errorDataSendFailed = 'Failed to send data to server';
 
   // ==================== Success Messages ====================
   static const String successServerConnected = 'Connected to server';

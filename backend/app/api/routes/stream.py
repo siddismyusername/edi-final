@@ -12,7 +12,7 @@ import base64
 import json
 import logging
 import time
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
@@ -23,6 +23,62 @@ from app.validators.sensor_validator import validate_imu_packet, validate_camera
 logger = logging.getLogger("etasync.stream")
 
 router = APIRouter(tags=["stream"])
+
+
+def _summarize_imu_packets(packets: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build a compact IMU summary for sync replay responses."""
+    if not packets:
+        return {"count": 0}
+
+    axes = ("ax", "ay", "az", "gx", "gy", "gz")
+    summary: Dict[str, Any] = {
+        "count": len(packets),
+        "start_timestamp": packets[0].get("timestamp"),
+        "end_timestamp": packets[-1].get("timestamp"),
+        "axes": {},
+    }
+
+    for axis in axes:
+        values = [float(packet[axis]) for packet in packets if axis in packet]
+        if values:
+            summary["axes"][axis] = {
+                "min": min(values),
+                "max": max(values),
+                "avg": sum(values) / len(values),
+            }
+
+    return summary
+
+
+def _cache_sync_replay_snapshot(
+    session_id: str,
+    window_data: Dict[str, Any],
+    result: Dict[str, Any],
+    server_timestamp: float,
+) -> None:
+    """Store the fused window in the rolling mobile sync replay cache."""
+    from app.core.sync_replay_cache import SyncReplaySnapshot
+    from app.main import get_sync_replay_cache
+
+    probabilities = {
+        str(label): float(score)
+        for label, score in result["all_probabilities"].items()
+    }
+
+    snapshot = SyncReplaySnapshot(
+        session_id=session_id,
+        server_timestamp=server_timestamp,
+        window_start=float(window_data["start_time"]),
+        window_end=float(window_data["end_time"]),
+        prediction=str(result["prediction"]),
+        confidence_score=float(result["confidence_score"]),
+        all_probabilities=probabilities,
+        imu_summary=_summarize_imu_packets(window_data["imu_packets"]),
+        frame_preview=None,
+        dtw_distance=float(result["dtw_distance"]),
+        alignment_path=result["alignment_path"],
+    )
+    get_sync_replay_cache().add(snapshot)
 
 
 # ── Helper: get or create default session ───────────────────
@@ -100,6 +156,14 @@ async def _try_process_window(session_id: str):
             "dtw_distance": result["dtw_distance"],
         })
 
+        server_timestamp = time.time()
+        _cache_sync_replay_snapshot(
+            session_id=session_id,
+            window_data=window_data,
+            result=result,
+            server_timestamp=server_timestamp,
+        )
+
         # Update session metrics
         session = sm.get_session(session_id)
         if session:
@@ -113,7 +177,7 @@ async def _try_process_window(session_id: str):
         await ws_manager.broadcast({
             "event": "FUSION_COMPLETED",
             "session_id": session_id,
-            "timestamp": time.time(),
+            "timestamp": server_timestamp,
             "data": {
                 "window_id": window_id,
                 "prediction": result["prediction"],

@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config.settings import settings
 from app.core.session_manager import SessionManager
+from app.core.sync_replay_cache import SyncReplayCache
 from app.storage.session_store import SessionStore, ArtifactStore
 from app.buffers.window_buffer import WindowBuffer
 from app.api.routes.diagnostics import WebSocketManager
@@ -33,6 +34,7 @@ _session_store: Optional[SessionStore] = None
 _artifact_store: Optional[ArtifactStore] = None
 _fusion_service = None  # Lazy-initialized to avoid import-time torch loading
 _ws_manager: Optional[WebSocketManager] = None
+_sync_replay_cache: Optional[SyncReplayCache] = None
 _buffers: Dict[str, WindowBuffer] = {}
 
 
@@ -64,6 +66,11 @@ def get_ws_manager() -> WebSocketManager:
     return _ws_manager
 
 
+def get_sync_replay_cache() -> SyncReplayCache:
+    assert _sync_replay_cache is not None
+    return _sync_replay_cache
+
+
 def get_buffers() -> Dict[str, WindowBuffer]:
     return _buffers
 
@@ -73,7 +80,7 @@ def get_buffers() -> Dict[str, WindowBuffer]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle hooks."""
-    global _session_manager, _session_store, _artifact_store, _ws_manager
+    global _session_manager, _session_store, _artifact_store, _ws_manager, _sync_replay_cache
 
     logger.info("=" * 60)
     logger.info("  ETA-Sync Backend Starting")
@@ -92,6 +99,7 @@ async def lifespan(app: FastAPI):
     _session_store = SessionStore(base_dir=settings.sessions_dir)
     _artifact_store = ArtifactStore(base_dir=settings.sessions_dir)
     _ws_manager = WebSocketManager()
+    _sync_replay_cache = SyncReplayCache(max_seconds=settings.sync_replay_seconds)
 
     # Lazy-load fusion service (loads PyTorch model)
     logger.info("Initializing fusion service...")
@@ -105,6 +113,8 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("ETA-Sync Backend shutting down...")
     _buffers.clear()
+    if _sync_replay_cache:
+        _sync_replay_cache.clear()
 
 
 # ── FastAPI App ─────────────────────────────────────────────
@@ -134,11 +144,13 @@ from app.api.routes.health import router as health_router
 from app.api.routes.session import router as session_router
 from app.api.routes.stream import router as stream_router
 from app.api.routes.diagnostics import router as diagnostics_router
+from app.api.routes.sync import router as sync_router
 
 app.include_router(health_router)
 app.include_router(session_router)
 app.include_router(stream_router)
 app.include_router(diagnostics_router)
+app.include_router(sync_router)
 
 
 # ── Root Endpoint ───────────────────────────────────────────

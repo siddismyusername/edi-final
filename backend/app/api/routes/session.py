@@ -43,7 +43,7 @@ async def create_session(request: SessionCreateRequest):
 @router.post("/close", response_model=SessionResponse)
 async def close_session(session_id: str):
     """Close an active session."""
-    from app.main import get_session_manager, get_session_store, get_buffers
+    from app.main import get_session_manager, get_session_store, get_buffers, get_sync_replay_cache
 
     sm = get_session_manager()
     session = sm.close_session(session_id)
@@ -56,6 +56,8 @@ async def close_session(session_id: str):
     if session_id in buffers:
         buffers[session_id].clear()
         del buffers[session_id]
+
+    get_sync_replay_cache().clear_session(session_id)
 
     # Update persisted metadata
     store = get_session_store()

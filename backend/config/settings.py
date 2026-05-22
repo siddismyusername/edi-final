@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     ws_heartbeat_interval: float = 5.0
     ws_max_clients: int = 20
 
+    # ── Mobile Sync Replay ─────────────────────────────────
+    sync_replay_seconds: int = 120
+
     class Config:
         env_prefix = "ETASYNC_"
         env_file = ".env"

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -25,15 +26,6 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  static const List<String> _backendRequirements = [
-    'Maintain a per-session rolling synchronized cache for the latest 120 seconds.',
-    'Expose GET /sync/status?session_id=... with readiness and available replay seconds.',
-    'Expose GET /sync/latest?session_id=...&offset_seconds=0..120 for fused playback.',
-    'Return session_id, server_timestamp, window_start, window_end, prediction, confidence_score, all_probabilities, imu_summary or sampled aligned IMU packets, optional frame preview, dtw_distance, and alignment_path.',
-    'Keep /imu, /frame, /ws/diagnostics, and existing dashboard events unchanged.',
-    'Reuse the existing session, WindowBuffer, fusion output, and artifact model instead of creating a parallel pipeline.',
-  ];
-
   final _serverUrlController = TextEditingController();
   final _sensorService = SensorService();
   final _cameraService = CameraService();
@@ -44,8 +36,17 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isConnected = false;
   bool _streamCamera = true;
   bool _streamImu = true;
-  bool _syncApiChecked = false;
   bool _syncApiAvailable = false;
+  String _syncStatusMessage =
+      'Start streaming to create a session for sync playback.';
+  String _currentSessionId = '';
+  double _replayOffsetSeconds = 0.0;
+  double _availableReplaySeconds = 0.0;
+  double _maxReplaySeconds = 120.0;
+  Map<String, dynamic>? _latestSyncReplay;
+  String? _latestSyncError;
+  Timer? _syncRefreshTimer;
+  bool _isReplayLoading = false;
   String _statusMessage = 'Not connected';
   int _imuCount = 0;
   int _frameCount = 0;
@@ -73,8 +74,8 @@ class _HomeScreenState extends State<HomeScreen> {
           _isConnected = connected;
           _statusMessage = connected ? 'Connected' : 'Disconnected';
           if (!connected) {
-            _syncApiChecked = false;
             _syncApiAvailable = false;
+            _stopSyncAutoRefresh();
           }
         });
       });
@@ -118,7 +119,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() {
       _statusMessage = 'Connecting...';
-      _syncApiChecked = false;
       _syncApiAvailable = false;
     });
 
@@ -129,6 +129,9 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() {
         _statusMessage = 'Connected';
         _isConnected = true;
+        _currentSessionId = '';
+        _syncStatusMessage =
+            'Connected. Start streaming to create a session for sync playback.';
       });
       _showSuccessSnackbar('Connected to server');
       await _checkSyncApiAvailability();
@@ -145,12 +148,106 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _checkSyncApiAvailability() async {
     if (!_isConnected) return;
-    final available = await _apiService.isSyncPlaybackAvailable();
+    final sessionId = _currentSessionId.isNotEmpty
+        ? _currentSessionId
+        : _apiService.currentSessionId;
+    if (sessionId == null || sessionId.isEmpty) {
+      if (!mounted) return;
+      setState(() {
+        _syncApiAvailable = false;
+        _syncStatusMessage = 'Start streaming first to create a live session.';
+      });
+      return;
+    }
+
+    final status =
+        await _apiService.getSyncPlaybackStatus(sessionId: sessionId);
     if (!mounted) return;
     setState(() {
-      _syncApiChecked = true;
-      _syncApiAvailable = available;
+      _syncApiAvailable = status.ready;
+      _availableReplaySeconds = status.availableSeconds;
+      _maxReplaySeconds = status.maxReplaySeconds > 0
+          ? status.maxReplaySeconds
+          : _maxReplaySeconds;
+      if (_replayOffsetSeconds > _maxReplaySeconds) {
+        _replayOffsetSeconds = _maxReplaySeconds;
+      }
+      _syncStatusMessage = status.ready
+          ? 'Sync playback ready for session ${sessionId.substring(0, sessionId.length > 8 ? 8 : sessionId.length)}.'
+          : status.available
+              ? 'Session is live, but replay windows are not ready yet.'
+              : 'Backend sync playback is unavailable for this session.';
     });
+
+    if (_mode == HomeMode.sync && status.ready) {
+      await _loadLatestSyncReplay();
+      _startSyncAutoRefresh();
+    } else if (_mode != HomeMode.sync || !status.ready) {
+      _stopSyncAutoRefresh();
+    }
+  }
+
+  void _setReplayOffset(double seconds) {
+    setState(() {
+      _replayOffsetSeconds = seconds.clamp(0.0, _maxReplaySeconds);
+    });
+  }
+
+  Future<void> _loadLatestSyncReplay({double? overrideOffsetSeconds}) async {
+    if (_isReplayLoading) return;
+    final sessionId = _currentSessionId.isNotEmpty
+        ? _currentSessionId
+        : _apiService.currentSessionId;
+    if (sessionId == null || sessionId.isEmpty) {
+      setState(() {
+        _latestSyncReplay = null;
+        _latestSyncError = 'Start streaming first to create a replay session.';
+      });
+      return;
+    }
+
+    setState(() {
+      _isReplayLoading = true;
+    });
+
+    final replay = await _apiService.getLatestSyncReplay(
+      sessionId: sessionId,
+      offsetSeconds: overrideOffsetSeconds ?? _replayOffsetSeconds,
+    );
+    if (!mounted) return;
+
+    setState(() {
+      _latestSyncReplay = replay;
+      _latestSyncError =
+          replay == null ? 'No replay window is ready yet.' : null;
+      _isReplayLoading = false;
+    });
+  }
+
+  void _startSyncAutoRefresh() {
+    _syncRefreshTimer?.cancel();
+    _syncRefreshTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!mounted) return;
+      if (_mode != HomeMode.sync || !_syncApiAvailable) return;
+      if (_replayOffsetSeconds > 0.1) return;
+      _loadLatestSyncReplay();
+    });
+  }
+
+  void _stopSyncAutoRefresh() {
+    _syncRefreshTimer?.cancel();
+    _syncRefreshTimer = null;
+  }
+
+  void _onSessionIdCaptured(String sessionId) {
+    if (sessionId.isEmpty || sessionId == _currentSessionId) {
+      return;
+    }
+
+    _currentSessionId = sessionId;
+    if (_mode == HomeMode.sync) {
+      _checkSyncApiAvailability();
+    }
   }
 
   Future<void> _startStreaming() async {
@@ -219,14 +316,14 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  void _stopStreaming() {
+  void _stopStreaming({bool updateUi = true}) {
     _sensorSubscription?.cancel();
     _frameSubscription?.cancel();
     _sensorSubscription = null;
     _frameSubscription = null;
     _cameraService.stopCapturing();
 
-    if (!mounted) return;
+    if (!updateUi || !mounted) return;
     setState(() {
       _isStreaming = false;
       _statusMessage = 'Stopped';
@@ -248,7 +345,13 @@ class _HomeScreenState extends State<HomeScreen> {
       gz: sensorData.gz,
     );
 
-    await _apiService.sendImuData(imuData.toJson());
+    final sent = await _apiService.sendImuData(imuData.toJson());
+    if (!sent) return;
+
+    final sessionId = _apiService.currentSessionId;
+    if (sessionId != null) {
+      _onSessionIdCaptured(sessionId);
+    }
 
     if (!mounted || !_isStreaming) return;
     setState(() {
@@ -267,9 +370,16 @@ class _HomeScreenState extends State<HomeScreen> {
       'frame_id': frameData.frameId,
       'resolution': frameData.resolution,
       'data': base64Encode(frameData.jpegData),
+      'mode': 'sync',
     };
 
-    await _apiService.sendCameraFrame(frameJson);
+    final sent = await _apiService.sendCameraFrame(frameJson);
+    if (!sent) return;
+
+    final sessionId = _apiService.currentSessionId;
+    if (sessionId != null) {
+      _onSessionIdCaptured(sessionId);
+    }
 
     if (!mounted || !_isStreaming) return;
     setState(() {
@@ -313,12 +423,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
-    _stopStreaming();
+    _stopStreaming(updateUi: false);
     _connectionStatusSubscription?.cancel();
     _serverUrlController.dispose();
     _sensorService.dispose();
     _cameraService.dispose();
-    _apiService.dispose();
+    _stopSyncAutoRefresh();
     super.dispose();
   }
 
@@ -378,6 +488,8 @@ class _HomeScreenState extends State<HomeScreen> {
               });
               if (selection.first == HomeMode.sync && _isConnected) {
                 _checkSyncApiAvailability();
+              } else {
+                _stopSyncAutoRefresh();
               }
             },
     );
@@ -412,6 +524,152 @@ class _HomeScreenState extends State<HomeScreen> {
             label: const Text('Connect to Server'),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildReplaySummary(
+    ThemeData theme,
+    ColorScheme colorScheme,
+    Map<String, dynamic> replay,
+  ) {
+    final prediction = replay['prediction'];
+    final confidence = replay['confidence'] ?? replay['confidence_score'];
+    final windowStart = replay['window_start'];
+    final windowEnd = replay['window_end'];
+    final framePreview = replay['frame_preview'];
+    final imuSummary = replay['imu_summary'];
+
+    Widget? frameWidget;
+    if (framePreview is String && framePreview.isNotEmpty) {
+      try {
+        final bytes = base64Decode(framePreview);
+        frameWidget = ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: AspectRatio(
+            aspectRatio: 16 / 9,
+            child: Image.memory(bytes, fit: BoxFit.cover),
+          ),
+        );
+      } catch (_) {
+        frameWidget = Text(
+          'Frame preview is unavailable.',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: colorScheme.onSurfaceVariant,
+          ),
+        );
+      }
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Latest replay window', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 8),
+          Text('Prediction: ${prediction ?? 'Unknown'}'),
+          Text('Confidence: ${_formatNumber(confidence)}'),
+          Text('Window: ${windowStart ?? 'N/A'} -> ${windowEnd ?? 'N/A'}'),
+          if (frameWidget != null) ...[
+            const SizedBox(height: 12),
+            frameWidget,
+          ],
+          if (imuSummary is Map<String, dynamic>) ...[
+            const SizedBox(height: 12),
+            _buildImuSummary(theme, colorScheme, imuSummary),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildImuSummary(
+    ThemeData theme,
+    ColorScheme colorScheme,
+    Map<String, dynamic> imuSummary,
+  ) {
+    final count = imuSummary['count'];
+    final start = imuSummary['start_timestamp'];
+    final end = imuSummary['end_timestamp'];
+    final axes = imuSummary['axes'];
+
+    final rows = <Widget>[];
+    if (axes is Map) {
+      axes.forEach((key, value) {
+        if (value is Map) {
+          rows.add(
+            Text(
+              '$key avg ${_formatNumber(value['avg'])} '
+              '(min ${_formatNumber(value['min'])}, max ${_formatNumber(value['max'])})',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+              ),
+            ),
+          );
+        }
+      });
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: colorScheme.surface.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('IMU summary', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 6),
+          Text('Samples: ${count ?? 'N/A'}'),
+          Text('Range: ${start ?? 'N/A'} -> ${end ?? 'N/A'}'),
+          if (rows.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            ...rows,
+          ],
+        ],
+      ),
+    );
+  }
+
+  String _formatNumber(dynamic value) {
+    if (value is num) {
+      return value.toStringAsFixed(2);
+    }
+    return 'N/A';
+  }
+
+  Widget _buildCameraPreview(ThemeData theme, ColorScheme colorScheme) {
+    final controller = _cameraService.controller;
+    if (controller == null || !controller.value.isInitialized) {
+      return Container(
+        height: 180,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Text(
+          'Camera preview will appear here once streaming starts.',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: colorScheme.onSurfaceVariant,
+          ),
+          textAlign: TextAlign.center,
+        ),
+      );
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: AspectRatio(
+        aspectRatio: controller.value.aspectRatio,
+        child: CameraPreview(controller),
       ),
     );
   }
@@ -484,6 +742,10 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ],
+          if (_streamCamera) ...[
+            const SizedBox(height: 16),
+            _buildCameraPreview(theme, colorScheme),
+          ],
         ],
       ),
     );
@@ -522,6 +784,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildSyncPlayback(ThemeData theme, ColorScheme colorScheme) {
     final unavailable = !_syncApiAvailable;
+    final hasSession = _currentSessionId.isNotEmpty ||
+        (_apiService.currentSessionId ?? '').isNotEmpty;
 
     return _buildSectionCard(
       title: 'Get Sync Stream',
@@ -542,18 +806,25 @@ class _HomeScreenState extends State<HomeScreen> {
                 Row(
                   children: [
                     Icon(
-                      unavailable
+                      !hasSession
                           ? Icons.hourglass_disabled_rounded
-                          : Icons.play_circle_rounded,
-                      color:
-                          unavailable ? colorScheme.error : colorScheme.primary,
+                          : unavailable
+                              ? Icons.hourglass_disabled_rounded
+                              : Icons.play_circle_rounded,
+                      color: !hasSession
+                          ? colorScheme.error
+                          : unavailable
+                              ? colorScheme.error
+                              : colorScheme.primary,
                     ),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
-                        unavailable
-                            ? 'Backend sync playback API not available'
-                            : 'Sync playback ready',
+                        !hasSession
+                            ? 'Start streaming to create a replay session'
+                            : unavailable
+                                ? 'Session active, waiting for replay windows'
+                                : 'Sync playback ready',
                         style: theme.textTheme.titleMedium,
                       ),
                     ),
@@ -561,86 +832,93 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  unavailable
-                      ? 'This screen is ready for a fused, synchronized two-minute playback stream once the backend exposes the required read-only sync endpoints.'
-                      : 'Use the timeline to inspect synchronized fused windows from the latest two minutes.',
+                  hasSession
+                      ? _syncStatusMessage
+                      : 'Start a live camera/IMU stream first. The backend creates a session automatically, and this screen can then replay the latest fused windows for that session.',
                   style: theme.textTheme.bodyMedium?.copyWith(
                     color: colorScheme.onSurfaceVariant,
                     height: 1.45,
                   ),
                 ),
+                if (_latestSyncError != null) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    _latestSyncError!,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: colorScheme.error,
+                    ),
+                  ),
+                ],
+                if (_latestSyncReplay != null) ...[
+                  const SizedBox(height: 12),
+                  _buildReplaySummary(theme, colorScheme, _latestSyncReplay!),
+                ],
               ],
             ),
           ),
           const SizedBox(height: 16),
-          _buildDisabledTimeline(theme, colorScheme),
+          _buildReplayTimeline(theme, colorScheme),
           const SizedBox(height: 16),
           FilledButton.tonalIcon(
-            onPressed: _isConnected ? _checkSyncApiAvailability : null,
+            onPressed: _isConnected ? _loadLatestSyncReplay : null,
             icon: const Icon(Icons.refresh_rounded),
-            label:
-                Text(_syncApiChecked ? 'Recheck Sync API' : 'Check Sync API'),
+            label: const Text('Load Replay Window'),
           ),
-          const SizedBox(height: 16),
-          Text(
-            'Backend requirements',
-            style: theme.textTheme.titleMedium,
-          ),
-          const SizedBox(height: 8),
-          ..._backendRequirements.map(
-            (requirement) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.only(top: 7),
-                    child: Icon(
-                      Icons.circle,
-                      size: 6,
-                      color: colorScheme.primary,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      requirement,
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                        height: 1.35,
-                      ),
-                    ),
-                  ),
-                ],
+          const SizedBox(height: 12),
+          if (_currentSessionId.isNotEmpty ||
+              (_apiService.currentSessionId ?? '').isNotEmpty)
+            Text(
+              'Active session: ${_currentSessionId.isNotEmpty ? _currentSessionId : _apiService.currentSessionId}',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: colorScheme.onSurfaceVariant,
               ),
             ),
-          ),
         ],
       ),
     );
   }
 
-  Widget _buildDisabledTimeline(ThemeData theme, ColorScheme colorScheme) {
+  Widget _buildReplayTimeline(ThemeData theme, ColorScheme colorScheme) {
+    final canReplay = _syncApiAvailable && _availableReplaySeconds > 0;
+    final maxSeconds = _availableReplaySeconds > 0
+        ? _availableReplaySeconds.clamp(0.0, _maxReplaySeconds)
+        : (_maxReplaySeconds > 0 ? _maxReplaySeconds : 120.0);
+    final clampedOffset = _replayOffsetSeconds.clamp(0.0, maxSeconds);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Row(
           children: [
             IconButton.filledTonal(
-              onPressed: null,
+              onPressed: canReplay
+                  ? () {
+                      final target =
+                          (clampedOffset + 10).clamp(0.0, maxSeconds);
+                      _setReplayOffset(target);
+                      _loadLatestSyncReplay(overrideOffsetSeconds: target);
+                    }
+                  : null,
               icon: const Icon(Icons.replay_10_rounded),
               tooltip: 'Move back 10 seconds',
             ),
             Expanded(
               child: Slider(
-                value: 120,
+                value: clampedOffset,
                 min: 0,
-                max: 120,
-                onChanged: null,
+                max: maxSeconds,
+                onChanged: canReplay ? _setReplayOffset : null,
+                onChangeEnd: canReplay
+                    ? (value) => _loadLatestSyncReplay(
+                          overrideOffsetSeconds: value,
+                        )
+                    : null,
               ),
             ),
             IconButton.filledTonal(
-              onPressed: null,
+              onPressed: canReplay
+                  ? () => _loadLatestSyncReplay(overrideOffsetSeconds: 0)
+                  : null,
               icon: const Icon(Icons.play_arrow_rounded),
               tooltip: 'Play synchronized stream',
             ),
@@ -649,17 +927,29 @@ class _HomeScreenState extends State<HomeScreen> {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(
-              '-2:00',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: colorScheme.onSurfaceVariant,
+            TextButton(
+              onPressed: canReplay
+                  ? () {
+                      _setReplayOffset(maxSeconds);
+                      _loadLatestSyncReplay(
+                        overrideOffsetSeconds: maxSeconds,
+                      );
+                    }
+                  : null,
+              child: Text(
+                _maxReplaySeconds >= 120
+                    ? '-2:00'
+                    : '-${maxSeconds.toStringAsFixed(0)}s',
               ),
             ),
-            Text(
-              'Live',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
+            TextButton(
+              onPressed: canReplay
+                  ? () {
+                      _setReplayOffset(0);
+                      _loadLatestSyncReplay(overrideOffsetSeconds: 0);
+                    }
+                  : null,
+              child: const Text('Live'),
             ),
           ],
         ),
@@ -745,8 +1035,12 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 Chip(
                   avatar: const Icon(Icons.sync_rounded, size: 18),
-                  label:
-                      Text(_syncApiAvailable ? 'Sync Ready' : 'Sync Pending'),
+                  label: Text(
+                    _currentSessionId.isNotEmpty ||
+                            (_apiService.currentSessionId ?? '').isNotEmpty
+                        ? (_syncApiAvailable ? 'Sync Ready' : 'Session Live')
+                        : 'Sync Pending',
+                  ),
                 ),
               ],
             ),

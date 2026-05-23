@@ -36,6 +36,42 @@ class WindowBuffer:
     _window_start: Optional[float] = None
     _window_count: int = 0
 
+    def _synchronize_window_start(self):
+        """
+        For multimodal windows, start from the first timestamp where both
+        streams can contribute. This avoids processing many empty frame windows
+        when one external source starts earlier than the other.
+        """
+        if self.min_frames <= 0 or not self._imu_buffer or not self._frame_buffer:
+            return
+
+        first_common_start = max(
+            self._imu_buffer[0]["timestamp"],
+            self._frame_buffer[0]["timestamp"],
+        )
+        if self._window_start is None or self._window_start < first_common_start:
+            old_start = self._window_start
+            self._window_start = first_common_start
+
+            imu_before = len(self._imu_buffer)
+            frame_before = len(self._frame_buffer)
+
+            self._imu_buffer = [
+                p for p in self._imu_buffer if p["timestamp"] >= self._window_start
+            ]
+            self._frame_buffer = [
+                p for p in self._frame_buffer if p["timestamp"] >= self._window_start
+            ]
+
+            imu_evicted = imu_before - len(self._imu_buffer)
+            frame_evicted = frame_before - len(self._frame_buffer)
+            if imu_evicted > 0 or frame_evicted > 0:
+                logger.warning(
+                    f"Staggered start sync: window_start moved "
+                    f"{old_start:.3f} → {first_common_start:.3f}, "
+                    f"evicted {imu_evicted} IMU / {frame_evicted} frame packets"
+                )
+
     def add_imu_packet(self, packet: Dict[str, Any]):
         """Add an IMU packet to the buffer."""
         self._imu_buffer.append(packet)
@@ -43,7 +79,7 @@ class WindowBuffer:
             self._window_start = packet["timestamp"]
 
     def add_frame_packet(self, packet: Dict[str, Any]):
-        """Add a camera frame packet to the buffer (metadata only, no raw bytes)."""
+        """Add a camera frame packet to the buffer."""
         self._frame_buffer.append(packet)
         if self._window_start is None:
             self._window_start = packet["timestamp"]
@@ -53,24 +89,34 @@ class WindowBuffer:
         Check if the current window has enough data.
         A window is ready when:
         - Sufficient IMU packets exist
-        - Sufficient frame packets exist
+        - Sufficient frame packets exist (if min_frames > 0)
         - The time span covers the window size
         """
-        if not self._imu_buffer or not self._frame_buffer:
+        if not self._imu_buffer:
             return False
+
+        if self.min_frames > 0 and not self._frame_buffer:
+            return False
+
+        self._synchronize_window_start()
 
         if len(self._imu_buffer) < self.min_imu:
             return False
 
-        if len(self._frame_buffer) < self.min_frames:
+        if self.min_frames > 0 and len(self._frame_buffer) < self.min_frames:
             return False
 
         if self._window_start is None:
             return False
 
-        # Check temporal span
-        latest_imu = self._imu_buffer[-1]["timestamp"]
-        time_span = latest_imu - self._window_start
+        # Check the span covered by all required streams.
+        latest_timestamp = self._imu_buffer[-1]["timestamp"]
+        if self.min_frames > 0:
+            latest_timestamp = min(
+                latest_timestamp,
+                self._frame_buffer[-1]["timestamp"],
+            )
+        time_span = latest_timestamp - self._window_start
         return time_span >= self.window_size
 
     def extract_window(self) -> Optional[Dict[str, Any]]:
@@ -95,7 +141,7 @@ class WindowBuffer:
         ]
 
         # Reject if extracted window has no data in either modality
-        if len(imu_window) < self.min_imu or len(frame_window) < self.min_frames:
+        if len(imu_window) < self.min_imu or (self.min_frames > 0 and len(frame_window) < self.min_frames):
             logger.debug(
                 f"Window rejected: {len(imu_window)} IMU, {len(frame_window)} frames "
                 f"(need {self.min_imu}/{self.min_frames})"

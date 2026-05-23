@@ -5,6 +5,8 @@ Enforces schema, timestamp, and payload constraints per LLD Section 15.
 
 import logging
 import time
+import base64
+import binascii
 from typing import Tuple
 
 from config.settings import settings
@@ -33,6 +35,10 @@ def validate_imu_packet(data: dict) -> Tuple[bool, str]:
     if not isinstance(ts, (int, float)) or ts <= 0:
         return False, "Invalid timestamp: must be a positive number"
 
+    if ts > 1e12:
+        ts = ts / 1000.0
+        data["timestamp"] = ts
+
     now = time.time()
     if abs(now - ts) > _TIMESTAMP_DRIFT_SECONDS:
         return False, f"Timestamp drift too large: {abs(now - ts):.0f}s"
@@ -45,7 +51,7 @@ def validate_imu_packet(data: dict) -> Tuple[bool, str]:
 
     # Validate mode if present
     mode = data.get("mode", "sync")
-    if mode not in ("sync", "async"):
+    if mode not in ("sync", "async", "imu_only"):
         return False, f"Invalid mode: {mode}"
 
     return True, ""
@@ -69,6 +75,14 @@ def validate_camera_packet(data: dict) -> Tuple[bool, str]:
     if not isinstance(ts, (int, float)) or ts <= 0:
         return False, "Invalid timestamp: must be a positive number"
 
+    if ts > 1e12:
+        ts = ts / 1000.0
+        data["timestamp"] = ts
+
+    now = time.time()
+    if abs(now - ts) > _TIMESTAMP_DRIFT_SECONDS:
+        return False, f"Timestamp drift too large: {abs(now - ts):.0f}s"
+
     # Validate frame_id
     frame_id = data.get("frame_id")
     if not isinstance(frame_id, int) or frame_id < 0:
@@ -83,5 +97,18 @@ def validate_camera_packet(data: dict) -> Tuple[bool, str]:
     approx_size = len(frame_data) * 3 // 4
     if approx_size > settings.max_frame_size_bytes:
         return False, f"Frame too large: ~{approx_size} bytes (max: {settings.max_frame_size_bytes})"
+
+    try:
+        decoded = base64.b64decode(frame_data, validate=True)
+    except (binascii.Error, ValueError):
+        return False, "Frame data must be valid base64"
+
+    if not decoded:
+        return False, "Frame data decoded to empty bytes"
+
+    # Validate mode if present
+    mode = data.get("mode", "sync")
+    if mode not in ("sync", "async", "imu_only"):
+        return False, f"Invalid mode: {mode}"
 
     return True, ""

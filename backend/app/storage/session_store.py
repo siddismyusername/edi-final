@@ -23,10 +23,15 @@ class SessionStore:
         self._base_dir = base_dir or settings.sessions_dir
         os.makedirs(self._base_dir, exist_ok=True)
 
-    def _session_dir(self, session_id: str) -> str:
+    def session_dir(self, session_id: str, create: bool = True) -> str:
+        """Return the filesystem path for a session directory."""
         path = os.path.join(self._base_dir, session_id)
-        os.makedirs(path, exist_ok=True)
+        if create:
+            os.makedirs(path, exist_ok=True)
         return path
+
+    def _session_dir(self, session_id: str) -> str:
+        return self.session_dir(session_id, create=True)
 
     # ── Metadata ────────────────────────────────────────────
 
@@ -39,7 +44,7 @@ class SessionStore:
 
     def load_metadata(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Load session metadata."""
-        path = os.path.join(self._session_dir(session_id), "metadata.json")
+        path = os.path.join(self.session_dir(session_id, create=False), "metadata.json")
         if not os.path.exists(path):
             return None
         with open(path, "r") as f:

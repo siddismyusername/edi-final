@@ -1,5 +1,16 @@
 # ETA-Sync Backend
 
+## Development Setup
+
+Use Python 3.12 for the backend environment. Python 3.14 is not currently a
+safe target for the pinned Torch/FastAPI stack.
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests -q
+```
+
 ## Evaluation Reports
 
 Run the evaluation script to generate the confusion matrix and performance report for the current checkpoint.

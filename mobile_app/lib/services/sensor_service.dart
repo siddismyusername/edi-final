@@ -31,13 +31,15 @@ class SensorService {
     _sensorDataController = StreamController<SensorData>.broadcast();
 
     // Listen to accelerometer events
-    _accelSubscription = accelerometerEvents.listen((AccelerometerEvent event) {
+    _accelSubscription =
+        accelerometerEventStream().listen((AccelerometerEvent event) {
       _latestAccel = event;
       _emitSensorData();
     });
 
     // Listen to gyroscope events
-    _gyroSubscription = gyroscopeEvents.listen((GyroscopeEvent event) {
+    _gyroSubscription =
+        gyroscopeEventStream().listen((GyroscopeEvent event) {
       _latestGyro = event;
       _emitSensorData();
     });

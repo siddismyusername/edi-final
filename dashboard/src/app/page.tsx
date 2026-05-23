@@ -66,6 +66,12 @@ function useETASync(backendUrl: string) {
   const [latencyHistory, setLatencyHistory] = useState<{ ts: number; dtw: number; fusion: number }[]>([]);
   const [confidenceHistory, setConfidenceHistory] = useState<{ ts: number; confidence: number; prediction: string }[]>([]);
 
+  const [accelHistory, setAccelHistory] = useState<{ ts: string; x: number; y: number; z: number }[]>([]);
+  const [gyroHistory, setGyroHistory] = useState<{ ts: string; x: number; y: number; z: number }[]>([]);
+  const [latestFrame, setLatestFrame] = useState<string | null>(null);
+  const [latestFrameId, setLatestFrameId] = useState<number | null>(null);
+  const [latestFrameTime, setLatestFrameTime] = useState<number | null>(null);
+
   const wsRef = useRef<WebSocketClient | null>(null);
   const imuTimestampsRef = useRef<number[]>([]);
   const frameTimestampsRef = useRef<number[]>([]);
@@ -79,6 +85,11 @@ function useETASync(backendUrl: string) {
     client.on('CONNECTED', (msg) => {
       setIsConnected(true);
       if (msg.data?.sessions) setSessions(msg.data.sessions as SessionInfo[]);
+      setAccelHistory([]);
+      setGyroHistory([]);
+      setLatestFrame(null);
+      setLatestFrameId(null);
+      setLatestFrameTime(null);
     });
 
     client.on('STATUS', (msg) => {
@@ -86,10 +97,40 @@ function useETASync(backendUrl: string) {
     });
 
     client.on('PACKET_RECEIVED', (msg) => {
-      const data = msg.data as { sensor: string; imu_count: number; frame_count: number };
+      const data = msg.data as any;
       const now = Date.now();
-      if (data.sensor === 'imu') imuTimestampsRef.current.push(now);
-      else frameTimestampsRef.current.push(now);
+      if (data.sensor === 'imu') {
+        imuTimestampsRef.current.push(now);
+        
+        // Format timestamp as a readable X-axis label (seconds.milliseconds)
+        const tsLabel = new Date(data.timestamp * 1000).toLocaleTimeString([], {
+          hour: '2-digit', minute: '2-digit', second: '2-digit',
+          fractionalSecondDigits: 2
+        } as any);
+
+        const newAccel = {
+          ts: tsLabel,
+          x: data.ax,
+          y: data.ay,
+          z: data.az,
+        };
+        const newGyro = {
+          ts: tsLabel,
+          x: data.gx,
+          y: data.gy,
+          z: data.gz,
+        };
+
+        setAccelHistory(prev => [...prev.slice(-299), newAccel]);
+        setGyroHistory(prev => [...prev.slice(-299), newGyro]);
+      } else {
+        frameTimestampsRef.current.push(now);
+        if (data.data) {
+          setLatestFrame(data.data);
+          setLatestFrameId(data.frame_id);
+          setLatestFrameTime(data.timestamp);
+        }
+      }
 
       const cutoff = now - 2000;
       imuTimestampsRef.current = imuTimestampsRef.current.filter(t => t > cutoff);
@@ -124,77 +165,13 @@ function useETASync(backendUrl: string) {
   return {
     isConnected, sessions, streamStats,
     latestFusion, fusionHistory, latencyHistory, confidenceHistory,
+    accelHistory, gyroHistory, latestFrame, latestFrameId, latestFrameTime,
   };
 }
 
 // ── Custom Visualization Components ────────────────────────
 
-function HeatmapCanvas({ matrix, title, width = 280, height = 200, path }: {
-  matrix: number[][]; title: string; width?: number; height?: number; path?: number[][];
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !matrix || matrix.length === 0) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const rows = matrix.length;
-    const cols = matrix[0].length;
-    canvas.width = width;
-    canvas.height = height;
-    const cellW = width / cols;
-    const cellH = height / rows;
-
-    let min = Infinity, max = -Infinity;
-    for (let i = 0; i < rows; i++) {
-      for (let j = 0; j < cols; j++) {
-        if (matrix[i][j] < min) min = matrix[i][j];
-        if (matrix[i][j] > max) max = matrix[i][j];
-      }
-    }
-    const range = max - min || 1;
-
-    for (let i = 0; i < rows; i++) {
-      for (let j = 0; j < cols; j++) {
-        const val = (matrix[i][j] - min) / range;
-        const r = Math.round(68 + val * 187);
-        const g = Math.round(1 + val * 180 + (1 - val) * 80);
-        const b = Math.round(84 + (1 - val) * 150 - val * 40);
-        ctx.fillStyle = `rgb(${Math.min(255, r)},${Math.min(255, g)},${Math.max(0, b)})`;
-        ctx.fillRect(j * cellW, i * cellH, cellW + 1, cellH + 1);
-      }
-    }
-
-    if (path && path.length > 0) {
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(path[0][1] * cellW + cellW / 2, path[0][0] * cellH + cellH / 2);
-      for (let k = 1; k < path.length; k++) {
-        ctx.lineTo(path[k][1] * cellW + cellW / 2, path[k][0] * cellH + cellH / 2);
-      }
-      ctx.stroke();
-    }
-  }, [matrix, width, height, path]);
-
-  return (
-    <div className="flex flex-col items-center">
-      <div className="text-xs font-medium text-muted-foreground mb-2">{title}</div>
-      <canvas
-        ref={canvasRef}
-        className="rounded-lg ring-1 ring-border"
-        style={{ width, height }}
-      />
-      <div className="flex items-center gap-2 mt-2 text-[10px] text-muted-foreground">
-        <span>Low</span>
-        <div className="w-16 h-2 rounded-full bg-gradient-to-r from-[#440154] via-[#21918c] to-[#fde725]" />
-        <span>High</span>
-      </div>
-    </div>
-  );
-}
 
 function ProbabilityBars({ probabilities }: { probabilities: Record<string, number> }) {
   const sorted = Object.entries(probabilities).sort(([, a], [, b]) => b - a);
@@ -225,10 +202,12 @@ export default function DashboardPage() {
   const [backendUrl, setBackendUrl] = useState('http://localhost:8000');
   const [isConfigured, setIsConfigured] = useState(false);
   const [inputUrl, setInputUrl] = useState('http://localhost:8000');
+  const [visiblePoints, setVisiblePoints] = useState<number>(150);
 
   const {
     isConnected, sessions, streamStats,
     latestFusion, fusionHistory, latencyHistory, confidenceHistory,
+    accelHistory, gyroHistory, latestFrame, latestFrameId, latestFrameTime,
   } = useETASync(isConfigured ? backendUrl : '');
 
   useEffect(() => { setIsConfigured(true); }, []);
@@ -295,67 +274,187 @@ export default function DashboardPage() {
 
         {/* ── Main Dashboard Grid ─────────────────────── */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* DTW Cost Matrix */}
-          <Card className="border">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-semibold">DTW Cost Matrix</CardTitle>
+          {/* Real-time Camera Frame */}
+          <Card className="border bg-card/60 backdrop-blur-md relative overflow-hidden transition-all duration-300 hover:shadow-lg hover:shadow-primary/5 hover:border-primary/30">
+            <CardHeader className="pb-3 flex flex-row items-center justify-between space-y-0">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <svg className="w-4 h-4 text-primary animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                </svg>
+                Real-Time Camera Frame
+              </CardTitle>
+              {latestFrame && (
+                <Badge variant="default" className="bg-emerald-500 hover:bg-emerald-600 text-[10px] py-0.5 px-2 font-semibold tracking-wider animate-pulse flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-white animate-ping" />
+                  LIVE
+                </Badge>
+              )}
             </CardHeader>
-            <CardContent>
-              {latestFusion?.cost_matrix ? (
-                <>
-                  <HeatmapCanvas
-                    matrix={latestFusion.cost_matrix}
-                    title={`${latestFusion.T_v} × ${latestFusion.T_i}`}
-                    path={latestFusion.alignment_path}
-                    width={320} height={220}
+            <CardContent className="flex flex-col items-center justify-center min-h-[260px] p-4 relative">
+              {latestFrame ? (
+                <div className="w-full relative rounded-lg overflow-hidden border border-border group">
+                  <img
+                    src={`data:image/jpeg;base64,${latestFrame}`}
+                    alt="Live Frame"
+                    className="w-full aspect-[4/3] object-cover rounded-lg transition-transform duration-500 group-hover:scale-[1.02]"
                   />
-                  <div className="mt-3 text-xs text-muted-foreground text-center">
-                    DTW Distance: <span className="text-primary font-mono font-semibold">{latestFusion.dtw_distance.toFixed(4)}</span>
+                  <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent p-3 text-[11px] text-white font-mono flex items-center justify-between">
+                    <span className="opacity-90">Frame ID: #{latestFrameId}</span>
+                    {latestFrameTime && (
+                      <span className="opacity-90">
+                        {new Date(latestFrameTime * 1000).toLocaleTimeString([], {
+                          hour: '2-digit', minute: '2-digit', second: '2-digit',
+                          fractionalSecondDigits: 3
+                        } as any)}
+                      </span>
+                    )}
                   </div>
-                </>
+                </div>
               ) : (
-                <div className="flex items-center justify-center h-52 text-sm text-muted-foreground">
-                  Waiting for alignment data...
+                <div className="flex flex-col items-center justify-center text-center p-6 bg-secondary/10 rounded-lg w-full aspect-[4/3] border border-dashed border-border group">
+                  <div className="relative mb-3 flex items-center justify-center">
+                    <div className="absolute inset-0 rounded-full bg-primary/10 w-12 h-12 animate-ping" />
+                    <div className="relative rounded-full bg-primary/20 w-12 h-12 flex items-center justify-center text-primary transition-transform duration-300 group-hover:rotate-12">
+                      <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                      </svg>
+                    </div>
+                  </div>
+                  <span className="text-sm font-medium text-muted-foreground">Waiting for camera feed...</span>
+                  <span className="text-[10px] text-muted-foreground/60 mt-1 max-w-[200px]">Ensure mobile app is streaming frames</span>
                 </div>
               )}
             </CardContent>
           </Card>
 
-          {/* Attention Weights */}
-          <Card className="border">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-semibold">Attention Weights</CardTitle>
+          {/* Live Accelerometer */}
+          <Card className="border bg-card/60 backdrop-blur-md transition-all duration-300 hover:shadow-lg hover:shadow-primary/5 hover:border-primary/30">
+            <CardHeader className="pb-3 flex flex-row items-center justify-between space-y-0">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <svg className="w-4 h-4 text-[#ec4899]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                </svg>
+                Live Accelerometer (m/s²)
+              </CardTitle>
+              <div className="flex items-center gap-4">
+                {accelHistory.length > 0 && (
+                  <div className="flex gap-2 text-[10px] font-mono border-r border-border/60 pr-4">
+                    <span className="text-[#ec4899]">X: {accelHistory[accelHistory.length - 1].x.toFixed(2)}</span>
+                    <span className="text-[#3b82f6]">Y: {accelHistory[accelHistory.length - 1].y.toFixed(2)}</span>
+                    <span className="text-[#10b981]">Z: {accelHistory[accelHistory.length - 1].z.toFixed(2)}</span>
+                  </div>
+                )}
+                <div className="flex items-center gap-1 bg-secondary/30 p-0.5 rounded-lg border border-border/40">
+                  {([50, 150, 300] as const).map((pts) => (
+                    <button
+                      key={pts}
+                      onClick={() => setVisiblePoints(pts)}
+                      className={`px-1.5 py-0.5 rounded text-[9px] font-medium transition-all ${
+                        visiblePoints === pts
+                          ? 'bg-primary text-primary-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground hover:bg-secondary/40'
+                      }`}
+                    >
+                      {pts}p
+                    </button>
+                  ))}
+                </div>
+              </div>
             </CardHeader>
-            <CardContent>
-              {latestFusion?.attention_weights ? (
-                <HeatmapCanvas
-                  matrix={latestFusion.attention_weights}
-                  title="Cross-Modal Attention"
-                  width={320} height={220}
-                />
+            <CardContent className="min-h-[260px] p-4 flex flex-col justify-between">
+              {accelHistory.length > 0 ? (
+                <div className="w-full h-[220px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={accelHistory.slice(-visiblePoints)} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} />
+                      <XAxis dataKey="ts" stroke="hsl(var(--muted-foreground))" fontSize={9} tickLine={false} axisLine={false} />
+                      <YAxis stroke="hsl(var(--muted-foreground))" fontSize={9} tickLine={false} axisLine={false} domain={['auto', 'auto']} />
+                      <Tooltip
+                        contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: 8, fontSize: 11 }}
+                        labelStyle={{ color: 'hsl(var(--foreground))' }}
+                      />
+                      <Line type="linear" dataKey="x" stroke="#ec4899" strokeWidth={1.5} dot={false} activeDot={{ r: 4 }} isAnimationActive={false} name="X-axis" />
+                      <Line type="linear" dataKey="y" stroke="#3b82f6" strokeWidth={1.5} dot={false} activeDot={{ r: 4 }} isAnimationActive={false} name="Y-axis" />
+                      <Line type="linear" dataKey="z" stroke="#10b981" strokeWidth={1.5} dot={false} activeDot={{ r: 4 }} isAnimationActive={false} name="Z-axis" />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
               ) : (
-                <div className="flex items-center justify-center h-52 text-sm text-muted-foreground">
-                  Waiting for fusion data...
+                <div className="flex flex-col items-center justify-center text-center p-6 bg-secondary/10 rounded-lg w-full aspect-[4/3] border border-dashed border-border">
+                  <div className="rounded-full bg-secondary w-10 h-10 flex items-center justify-center text-muted-foreground mb-2">
+                    <svg className="w-5 h-5 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                    </svg>
+                  </div>
+                  <span className="text-sm font-medium text-muted-foreground">Waiting for IMU feed...</span>
+                  <span className="text-[10px] text-muted-foreground/60 mt-1 max-w-[200px]">Ensure ESP32 is powered & streaming</span>
                 </div>
               )}
             </CardContent>
           </Card>
 
-          {/* DTW Bias Matrix */}
-          <Card className="border">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-semibold">DTW Bias Matrix</CardTitle>
+          {/* Live Gyroscope */}
+          <Card className="border bg-card/60 backdrop-blur-md transition-all duration-300 hover:shadow-lg hover:shadow-primary/5 hover:border-primary/30">
+            <CardHeader className="pb-3 flex flex-row items-center justify-between space-y-0">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <svg className="w-4 h-4 text-[#a855f7]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
+                </svg>
+                Live Gyroscope (rad/s)
+              </CardTitle>
+              <div className="flex items-center gap-4">
+                {gyroHistory.length > 0 && (
+                  <div className="flex gap-2 text-[10px] font-mono border-r border-border/60 pr-4">
+                    <span className="text-[#a855f7]">X: {gyroHistory[gyroHistory.length - 1].x.toFixed(2)}</span>
+                    <span className="text-[#f97316]">Y: {gyroHistory[gyroHistory.length - 1].y.toFixed(2)}</span>
+                    <span className="text-[#06b6d4]">Z: {gyroHistory[gyroHistory.length - 1].z.toFixed(2)}</span>
+                  </div>
+                )}
+                <div className="flex items-center gap-1 bg-secondary/30 p-0.5 rounded-lg border border-border/40">
+                  {([50, 150, 300] as const).map((pts) => (
+                    <button
+                      key={pts}
+                      onClick={() => setVisiblePoints(pts)}
+                      className={`px-1.5 py-0.5 rounded text-[9px] font-medium transition-all ${
+                        visiblePoints === pts
+                          ? 'bg-primary text-primary-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground hover:bg-secondary/40'
+                      }`}
+                    >
+                      {pts}p
+                    </button>
+                  ))}
+                </div>
+              </div>
             </CardHeader>
-            <CardContent>
-              {latestFusion?.bias_matrix ? (
-                <HeatmapCanvas
-                  matrix={latestFusion.bias_matrix}
-                  title="Temporal Alignment Prior"
-                  width={320} height={220}
-                />
+            <CardContent className="min-h-[260px] p-4 flex flex-col justify-between">
+              {gyroHistory.length > 0 ? (
+                <div className="w-full h-[220px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={gyroHistory.slice(-visiblePoints)} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} />
+                      <XAxis dataKey="ts" stroke="hsl(var(--muted-foreground))" fontSize={9} tickLine={false} axisLine={false} />
+                      <YAxis stroke="hsl(var(--muted-foreground))" fontSize={9} tickLine={false} axisLine={false} domain={['auto', 'auto']} />
+                      <Tooltip
+                        contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: 8, fontSize: 11 }}
+                        labelStyle={{ color: 'hsl(var(--foreground))' }}
+                      />
+                      <Line type="linear" dataKey="x" stroke="#a855f7" strokeWidth={1.5} dot={false} activeDot={{ r: 4 }} isAnimationActive={false} name="X-axis" />
+                      <Line type="linear" dataKey="y" stroke="#f97316" strokeWidth={1.5} dot={false} activeDot={{ r: 4 }} isAnimationActive={false} name="Y-axis" />
+                      <Line type="linear" dataKey="z" stroke="#06b6d4" strokeWidth={1.5} dot={false} activeDot={{ r: 4 }} isAnimationActive={false} name="Z-axis" />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
               ) : (
-                <div className="flex items-center justify-center h-52 text-sm text-muted-foreground">
-                  Waiting for alignment data...
+                <div className="flex flex-col items-center justify-center text-center p-6 bg-secondary/10 rounded-lg w-full aspect-[4/3] border border-dashed border-border">
+                  <div className="rounded-full bg-secondary w-10 h-10 flex items-center justify-center text-muted-foreground mb-2">
+                    <svg className="w-5 h-5 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
+                    </svg>
+                  </div>
+                  <span className="text-sm font-medium text-muted-foreground">Waiting for IMU feed...</span>
+                  <span className="text-[10px] text-muted-foreground/60 mt-1 max-w-[200px]">Ensure ESP32 is powered & streaming</span>
                 </div>
               )}
             </CardContent>
@@ -397,17 +496,17 @@ export default function DashboardPage() {
                 <>
                   <ResponsiveContainer width="100%" height={140}>
                     <LineChart data={latencyHistory.map((d, i) => ({ idx: i, ...d }))}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
                       <XAxis dataKey="idx" hide />
-                      <YAxis stroke="hsl(var(--muted-foreground))" fontSize={10} tickFormatter={(v) => `${v}ms`} />
+                      <YAxis stroke="#9ca3af" fontSize={10} tickFormatter={(v) => `${v}ms`} />
                       <Tooltip
-                        contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: 8, fontSize: 12 }}
-                        labelStyle={{ color: 'hsl(var(--foreground))' }}
+                        contentStyle={{ background: '#0f172a', border: '1px solid #1f2937', borderRadius: 8, fontSize: 12 }}
+                        labelStyle={{ color: '#e2e8f0' }}
                         formatter={(value) => [`${Number(value).toFixed(1)}ms`]}
                       />
-                      <Line type="monotone" dataKey="dtw" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} name="DTW" />
-                      <Line type="monotone" dataKey="fusion" stroke="hsl(var(--secondary))" strokeWidth={2} dot={false} name="Fusion" />
-                      <Legend iconSize={8} wrapperStyle={{ fontSize: 10, paddingTop: 4 }} />
+                      <Line type="monotone" dataKey="dtw" stroke="#38bdf8" strokeWidth={2} dot={false} name="DTW" />
+                      <Line type="monotone" dataKey="fusion" stroke="#f59e0b" strokeWidth={2} dot={false} name="Fusion" />
+                      <Legend iconSize={8} wrapperStyle={{ fontSize: 10, paddingTop: 4, color: '#e2e8f0' }} />
                     </LineChart>
                   </ResponsiveContainer>
                   <div className="flex justify-between mt-2 text-xs text-muted-foreground">
@@ -437,20 +536,21 @@ export default function DashboardPage() {
                 <>
                   <ResponsiveContainer width="100%" height={140}>
                     <AreaChart data={confidenceHistory.map((d, i) => ({ idx: i, ...d }))}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
                       <XAxis dataKey="idx" hide />
-                      <YAxis stroke="hsl(var(--muted-foreground))" fontSize={10} domain={[0, 1]} tickFormatter={(v) => `${(v * 100).toFixed(0)}%`} />
+                      <YAxis stroke="#9ca3af" fontSize={10} domain={[0, 1]} tickFormatter={(v) => `${(v * 100).toFixed(0)}%`} />
                       <Tooltip
-                        contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: 8, fontSize: 12 }}
+                        contentStyle={{ background: '#0f172a', border: '1px solid #1f2937', borderRadius: 8, fontSize: 12 }}
+                        labelStyle={{ color: '#e2e8f0' }}
                         formatter={(value) => [`${(Number(value) * 100).toFixed(1)}%`]}
                       />
                       <defs>
                         <linearGradient id="confGrad" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity={0.3} />
-                          <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity={0.05} />
+                          <stop offset="0%" stopColor="#38bdf8" stopOpacity={0.35} />
+                          <stop offset="100%" stopColor="#38bdf8" stopOpacity={0.08} />
                         </linearGradient>
                       </defs>
-                      <Area type="monotone" dataKey="confidence" stroke="hsl(var(--primary))" strokeWidth={2} fill="url(#confGrad)" name="Confidence" />
+                      <Area type="monotone" dataKey="confidence" stroke="#38bdf8" strokeWidth={2} fill="url(#confGrad)" name="Confidence" />
                     </AreaChart>
                   </ResponsiveContainer>
                   <div className="flex justify-between mt-2 text-xs text-muted-foreground">

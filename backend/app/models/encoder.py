@@ -6,6 +6,7 @@ Lightweight architectures suitable for edge deployment per LLD Section 3.6.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional
 
 from config.settings import settings
 
@@ -24,7 +25,7 @@ class VisualEncoder(nn.Module):
         self,
         input_channels: int = 3,
         frame_size: int = 64,
-        embed_dim: int = None,
+        embed_dim: Optional[int] = None,
         feature_mode: bool = False,
         feature_dim: int = 12,
     ):
@@ -92,7 +93,7 @@ class IMUEncoder(nn.Module):
     during inference.
     """
 
-    def __init__(self, input_dim: int = 6, embed_dim: int = None):
+    def __init__(self, input_dim: int = 6, embed_dim: Optional[int] = None):
         super().__init__()
         self.embed_dim = embed_dim or settings.embedding_dim
 

@@ -15,10 +15,11 @@ logger = logging.getLogger("etasync.session")
 class SessionManager:
     """Manages active sessions and their lifecycles."""
 
-    def __init__(self, timeout_seconds: int = 600, max_sessions: int = 10):
+    def __init__(self, timeout_seconds: int = 600, max_sessions: int = 10, on_expire=None):
         self._sessions: Dict[str, Session] = {}
         self._timeout = timeout_seconds
         self._max_sessions = max_sessions
+        self._on_expire = on_expire
 
     # ── Session CRUD ────────────────────────────────────────
 
@@ -64,6 +65,7 @@ class SessionManager:
 
         session.state = SessionStateEnum.COMPLETED
         session.metadata.closed_at = time.time()
+        del self._sessions[session_id]
         logger.info(f"Session closed: {session_id}")
         return session
 
@@ -78,7 +80,14 @@ class SessionManager:
     def list_sessions(self) -> List[Session]:
         """List all active sessions."""
         self._cleanup_expired()
-        return list(self._sessions.values())
+        return [
+            session for session in self._sessions.values()
+            if session.state not in {
+                SessionStateEnum.COMPLETED,
+                SessionStateEnum.ARCHIVED,
+                SessionStateEnum.ERROR,
+            }
+        ]
 
     @property
     def active_count(self) -> int:
@@ -113,6 +122,11 @@ class SessionManager:
         logger.warning(f"Session expired: {session.session_id}")
         session.state = SessionStateEnum.COMPLETED
         session.metadata.closed_at = time.time()
+        if self._on_expire:
+            try:
+                self._on_expire(session.session_id)
+            except Exception as e:
+                logger.error(f"Error in on_expire callback: {e}")
         del self._sessions[session.session_id]
 
     def _cleanup_expired(self):

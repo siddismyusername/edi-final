@@ -69,6 +69,24 @@ class TestWindowExtraction:
         buffer.extract_window()
         assert buffer.windows_extracted == 1
 
+    def test_staggered_sources_align_to_common_time_range(self, buffer):
+        base = time.time()
+
+        for i in range(400):
+            buffer.add_imu_packet({"timestamp": base + i * 0.05, "ax": 0.1, "ay": 0.2, "az": 9.81, "gx": 0, "gy": 0, "gz": 0})
+
+        camera_start = base + 10.0
+        for i in range(16):
+            buffer.add_frame_packet({"timestamp": camera_start + i * 0.2, "frame_id": i})
+
+        assert buffer.is_window_ready() is True
+        window = buffer.extract_window()
+
+        assert window is not None
+        assert window["start_time"] >= camera_start
+        assert len(window["imu_packets"]) >= buffer.min_imu
+        assert len(window["frame_packets"]) >= buffer.min_frames
+
 
 class TestBufferClear:
     def test_clear_resets(self, buffer):

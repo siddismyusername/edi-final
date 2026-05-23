@@ -1,6 +1,5 @@
-/// Configuration file for ETA-Sync Mobile Application
-///
-/// Contains server URL, API endpoints, and app configuration constants
+// Configuration file for ETA-Sync Mobile Application.
+// Contains server URL, API endpoints, and app configuration constants.
 
 class AppConfig {
   // Server Configuration

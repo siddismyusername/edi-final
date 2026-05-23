@@ -1,4 +1,4 @@
-/// App-wide constants used throughout the ETA-Sync mobile application
+// App-wide constants used throughout the ETA-Sync mobile application.
 
 class AppConstants {
   // Prevent instantiation

@@ -5,6 +5,8 @@ These endpoints expose the latest fused windows from the existing pipeline.
 They do not trigger fusion or read persisted artifacts.
 """
 
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 
 router = APIRouter(prefix="/sync", tags=["sync"])
@@ -25,9 +27,18 @@ def _require_active_session(session_id: str):
 
 
 @router.get("/status")
-async def sync_status(session_id: str):
+async def sync_status(session_id: Optional[str] = None):
     """Return whether synchronized playback is ready for an active session."""
     from app.main import get_sync_replay_cache
+
+    if session_id is None:
+        cache = get_sync_replay_cache()
+        return {
+            "available": True,
+            "ready": False,
+            "available_seconds": 0.0,
+            "max_replay_seconds": cache.max_seconds,
+        }
 
     _require_active_session(session_id)
     return get_sync_replay_cache().status(session_id)

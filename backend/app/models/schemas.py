@@ -19,6 +19,7 @@ class SensorType(str, Enum):
 class StreamingMode(str, Enum):
     SYNC = "sync"
     ASYNC = "async"
+    IMU_ONLY = "imu_only"
 
 
 class SessionState(str, Enum):

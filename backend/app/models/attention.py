@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from typing import Optional
 
 from config.settings import settings
 
@@ -23,9 +24,9 @@ class DTWGuidedCrossAttention(nn.Module):
 
     def __init__(
         self,
-        embed_dim: int = None,
-        num_heads: int = None,
-        alpha: float = None,
+        embed_dim: Optional[int] = None,
+        num_heads: Optional[int] = None,
+        alpha: Optional[float] = None,
         dropout: float = 0.1,
     ):
         super().__init__()
@@ -124,8 +125,8 @@ class PredictionHead(nn.Module):
 
     def __init__(
         self,
-        embed_dim: int = None,
-        num_classes: int = None,
+        embed_dim: Optional[int] = None,
+        num_classes: Optional[int] = None,
         dropout: float = 0.3,
     ):
         super().__init__()

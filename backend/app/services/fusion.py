@@ -31,7 +31,7 @@ logger = logging.getLogger("etasync.fusion")
 VISUAL_FEATURE_DIM = 12
 CHECKPOINT_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-    "etasync_model.pt",
+    "etasync_v2_best.pt",
 )
 
 
@@ -106,8 +106,9 @@ class FusionService:
         self,
         imu_packets: List[Dict[str, Any]],
         frame_packets: List[Dict[str, Any]],
-        session_dir: str = None,
-    ) -> Dict[str, Any]:
+        session_dir: Optional[str] = None,
+        mode: str = "sync",
+    ) -> Optional[Dict[str, Any]]:
         """
         Process a complete temporal window through the full fusion pipeline.
 
@@ -115,6 +116,7 @@ class FusionService:
             imu_packets: list of IMU sensor dicts with ax,ay,az,gx,gy,gz
             frame_packets: list of camera frame metadata dicts
             session_dir: optional path to session directory for frame loading
+            mode: session mode ("sync", "async", or "imu_only")
 
         Returns:
             dict with prediction, confidence, attention weights, cost matrix,
@@ -123,15 +125,31 @@ class FusionService:
         t_start = time.time()
 
         # Guard against empty windows
-        if not imu_packets or not frame_packets:
-            logger.warning("Skipping empty window (no IMU or frame data)")
+        if not imu_packets:
+            logger.warning("Skipping empty window (no IMU data)")
             return None
 
         # ── Step 1: Extract RAW features (per LLD Section 11) ───
         imu_features_np = DTWService.extract_imu_features(imu_packets)  # (T_i, 6)
-        visual_features_np = DTWService.extract_visual_features(
-            frame_packets, session_dir=session_dir
-        )  # (T_v, 12)
+
+        imu_only = mode == "imu_only" or not frame_packets
+        if not imu_only and frame_packets:
+            # extract_visual_features expects a str session_dir; ensure we
+            # never pass None (use empty string when session_dir is None)
+            visual_features_np = DTWService.extract_visual_features(
+                frame_packets, session_dir=(session_dir if session_dir is not None else "")
+            )  # (T_v, 12)
+        else:
+            # IMU-only mode: create mock visual features scaled to T_i.
+            # DTW/attention results will not be meaningful without real
+            # visual data; this is a placeholder for the research prototype.
+            mock_T_v = max(1, imu_features_np.shape[0] // 4)
+            visual_features_np = np.zeros((mock_T_v, 12), dtype=np.float32)
+            if imu_only:
+                logger.warning(
+                    f"IMU-only window ({len(imu_packets)} packets): "
+                    "using mock visual features — predictions may not be meaningful"
+                )
 
         T_i = imu_features_np.shape[0]
         T_v = visual_features_np.shape[0]
@@ -178,7 +196,7 @@ class FusionService:
         logits = self._prediction_head(fused)  # (1, num_classes)
         probs = F.softmax(logits, dim=-1).squeeze(0)  # (num_classes,)
 
-        pred_idx = probs.argmax().item()
+        pred_idx = int(probs.argmax().item())
         confidence = probs[pred_idx].item()
         prediction = settings.activity_labels[pred_idx]
 

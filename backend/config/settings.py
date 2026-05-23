@@ -3,7 +3,7 @@ ETA-Sync Configuration Module
 Centralizes all configurable parameters for the backend.
 """
 
-from pydantic import Field
+from pydantic import Field, ConfigDict
 from pydantic_settings import BaseSettings
 from typing import List
 
@@ -57,9 +57,10 @@ class Settings(BaseSettings):
     # ── Mobile Sync Replay ─────────────────────────────────
     sync_replay_seconds: int = 120
 
-    class Config:
-        env_prefix = "ETASYNC_"
-        env_file = ".env"
+    model_config = ConfigDict(
+        env_prefix="ETASYNC_",
+        env_file=".env",
+    )
 
 
 # Singleton settings instance

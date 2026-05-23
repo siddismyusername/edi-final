@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-05-21T18:47:25.891056Z",
+  "timestamp": "2026-05-22T20:56:30.906537Z",
   "device": "cpu",
   "checkpoint": "etasync_v2_best.pt",
-  "checkpoint_epoch": 16,
-  "accuracy": 0.912,
-  "macro_f1": 0.9167656631696354,
-  "avg_confidence": 0.748320977807045,
-  "avg_latency_sec": 0.017818833154345317,
-  "max_latency_sec": 0.061199188232421875,
-  "latency_std_sec": 0.005857878597093882,
+  "checkpoint_epoch": 13,
+  "accuracy": 0.954,
+  "macro_f1": 0.9572012231485753,
+  "avg_confidence": 0.6808345854878426,
+  "avg_latency_sec": 0.02130866429162404,
+  "max_latency_sec": 0.061101675033569336,
+  "latency_std_sec": 0.007779215875803402,
   "num_samples": 500
 }

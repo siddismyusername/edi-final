@@ -12,7 +12,7 @@ import base64
 import json
 import logging
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Set
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
@@ -23,6 +23,7 @@ from app.validators.sensor_validator import validate_imu_packet, validate_camera
 logger = logging.getLogger("etasync.stream")
 
 router = APIRouter(tags=["stream"])
+_processing_sessions: Set[str] = set()
 
 
 def _summarize_imu_packets(packets: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -65,6 +66,13 @@ def _cache_sync_replay_snapshot(
         for label, score in result["all_probabilities"].items()
     }
 
+    frame_preview = None
+    frame_packets = window_data.get("frame_packets") or []
+    if frame_packets:
+        last_frame = frame_packets[-1]
+        if isinstance(last_frame, dict):
+            frame_preview = last_frame.get("data") or last_frame.get("preview")
+
     snapshot = SyncReplaySnapshot(
         session_id=session_id,
         server_timestamp=server_timestamp,
@@ -74,7 +82,7 @@ def _cache_sync_replay_snapshot(
         confidence_score=float(result["confidence_score"]),
         all_probabilities=probabilities,
         imu_summary=_summarize_imu_packets(window_data["imu_packets"]),
-        frame_preview=None,
+        frame_preview=frame_preview,
         dtw_distance=float(result["dtw_distance"]),
         alignment_path=result["alignment_path"],
     )
@@ -83,25 +91,50 @@ def _cache_sync_replay_snapshot(
 
 # ── Helper: get or create default session ───────────────────
 
-def _get_or_create_session():
-    """Get the latest active streaming session, or auto-create one."""
+def _get_or_create_session(mode: str = "sync", sensor: str = "imu"):
+    """Get the latest active streaming session, or auto-create one.
+
+    Session matching is mode-agnostic so that an ESP32 (IMU) and a
+    mobile phone (camera) always land on the **same** session regardless
+    of which mode string each device sends.  When a camera frame
+    arrives on a session that was originally created as ``imu_only``,
+    the buffer is dynamically upgraded to require frames.
+    """
     from app.main import get_session_manager, get_buffers
     from app.buffers.window_buffer import WindowBuffer
+    from config.settings import settings
 
     sm = get_session_manager()
+    requested_mode = mode or "sync"
+
+    # Pick the most recent active session regardless of mode so that
+    # dual-device streams always converge on one session.
     sessions = sm.list_sessions()
 
     if sessions:
-        # Prefer the most recently created session (last in list)
         session = sessions[-1]
     else:
         # Auto-create a default session for direct IMU/frame posts
-        session = sm.create_session(device_id="mobile-auto", mode="sync")
+        session = sm.create_session(device_id="mobile-auto", mode=requested_mode)
 
     # Ensure buffer exists
     buffers = get_buffers()
     if session.session_id not in buffers:
-        buffers[session.session_id] = WindowBuffer()
+        min_frames = 0 if requested_mode == "imu_only" else settings.min_frames_per_window
+        buffers[session.session_id] = WindowBuffer(min_frames=min_frames)
+
+    # Dynamic buffer upgrade: if a camera frame arrives on a session
+    # whose buffer was created with min_frames=0 (imu_only), upgrade
+    # it so that future windows will wait for frames.
+    buf = buffers[session.session_id]
+    if sensor == "camera" and buf.min_frames == 0:
+        buf.min_frames = settings.min_frames_per_window
+        if session.metadata.mode == "imu_only":
+            session.metadata.mode = "sync"
+        logger.info(
+            f"Buffer for session {session.session_id} upgraded: "
+            f"min_frames=0 → {buf.min_frames} (camera frames detected)"
+        )
 
     # Update state
     if session.state == SessionStateEnum.INITIALIZED:
@@ -110,37 +143,66 @@ def _get_or_create_session():
     return session
 
 
-async def _try_process_window(session_id: str):
+def _schedule_window_processing(session_id: str) -> None:
+    """Schedule window processing without blocking ingestion responses."""
+    try:
+        asyncio.get_running_loop().create_task(_process_ready_windows(session_id))
+    except RuntimeError:
+        logger.warning("No running event loop; processing window inline is unavailable")
+
+
+async def _process_ready_windows(session_id: str) -> None:
+    """Process all currently ready windows for a session, one worker at a time."""
+    if session_id in _processing_sessions:
+        return
+
+    _processing_sessions.add(session_id)
+    try:
+        while await _try_process_window(session_id):
+            pass
+    finally:
+        _processing_sessions.discard(session_id)
+
+
+async def _try_process_window(session_id: str) -> bool:
     """Check if buffer is ready and trigger fusion pipeline."""
-    from app.main import get_buffers, get_fusion_service, get_artifact_store, get_ws_manager, get_session_manager
+    from app.main import get_buffers, get_fusion_service, get_artifact_store, get_ws_manager, get_session_manager, get_session_store
 
     buffers = get_buffers()
     buffer = buffers.get(session_id)
     if not buffer or not buffer.is_window_ready():
-        return
+        return False
 
     window_data = buffer.extract_window()
     if not window_data:
-        return
+        return False
 
     sm = get_session_manager()
     sm.transition_state(session_id, SessionStateEnum.PROCESSING)
 
-    fusion_service = get_fusion_service()
     artifact_store = get_artifact_store()
     ws_manager = get_ws_manager()
 
     try:
+        fusion_service = get_fusion_service()
+        session_dir = get_session_store().session_dir(session_id, create=True)
+
+        # Resolve session mode for downstream fusion decisions
+        session = sm.get_session(session_id)
+        session_mode = session.metadata.mode if session else "sync"
+
         # Run fusion pipeline
         result = fusion_service.process_window(
             imu_packets=window_data["imu_packets"],
             frame_packets=window_data["frame_packets"],
+            session_dir=session_dir,
+            mode=session_mode,
         )
 
         # Fusion returns None for empty/invalid windows
         if result is None:
             sm.transition_state(session_id, SessionStateEnum.STREAMING)
-            return
+            return True
 
         window_id = window_data["window_id"]
 
@@ -201,10 +263,12 @@ async def _try_process_window(session_id: str):
             f"Window {window_id} processed: "
             f"{result['prediction']} ({result['confidence_score']:.2f})"
         )
+        return True
 
     except Exception as e:
         logger.error(f"Fusion pipeline error: {e}", exc_info=True)
         sm.transition_state(session_id, SessionStateEnum.STREAMING)
+        return True
 
 
 # ── REST Endpoints ──────────────────────────────────────────
@@ -221,7 +285,7 @@ async def receive_imu(packet: SensorPacket):
     if not valid:
         raise HTTPException(status_code=400, detail=err)
 
-    session = _get_or_create_session()
+    session = _get_or_create_session(packet.mode, sensor="imu")
     session.stream_state.imu_packet_count += 1
     session.stream_state.last_imu_timestamp = packet.timestamp
     session.touch()
@@ -230,9 +294,9 @@ async def receive_imu(packet: SensorPacket):
     buffers = get_buffers()
     buffers[session.session_id].add_imu_packet(packet_dict)
 
-    # Persist
+    # Persist (offloaded to thread pool to avoid blocking the event loop)
     store = get_session_store()
-    store.append_sensor_data(session.session_id, packet_dict)
+    await asyncio.to_thread(store.append_sensor_data, session.session_id, packet_dict)
 
     # Broadcast packet received event
     ws_manager = get_ws_manager()
@@ -244,11 +308,18 @@ async def receive_imu(packet: SensorPacket):
             "sensor": "imu",
             "imu_count": session.stream_state.imu_packet_count,
             "frame_count": session.stream_state.frame_count,
+            "ax": packet.ax,
+            "ay": packet.ay,
+            "az": packet.az,
+            "gx": packet.gx,
+            "gy": packet.gy,
+            "gz": packet.gz,
+            "timestamp": packet.timestamp,
         },
     })
 
-    # Check if window is ready for processing
-    await _try_process_window(session.session_id)
+    # Process any ready windows asynchronously so ingestion stays responsive.
+    _schedule_window_processing(session.session_id)
 
     return {"status": "ok", "session_id": session.session_id}
 
@@ -265,25 +336,27 @@ async def receive_frame(packet: CameraPacket):
     if not valid:
         raise HTTPException(status_code=400, detail=err)
 
-    session = _get_or_create_session()
+    session = _get_or_create_session(packet.mode, sensor="camera")
     session.stream_state.frame_count += 1
     session.stream_state.last_frame_timestamp = packet.timestamp
     session.touch()
 
-    # Save raw frame bytes
+    # Save raw frame bytes (offloaded to thread pool to avoid blocking the event loop)
     try:
-        frame_bytes = base64.b64decode(packet.data)
+        frame_bytes = base64.b64decode(packet.data, validate=True)
         store = get_session_store()
-        store.save_frame(session.session_id, packet.frame_id, frame_bytes)
+        await asyncio.to_thread(store.save_frame, session.session_id, packet.frame_id, frame_bytes)
     except Exception as e:
-        logger.warning(f"Frame decode/save error: {e}")
+        logger.error(f"Frame decode/save error: {e}")
+        raise HTTPException(status_code=400, detail="Invalid frame payload")
 
-    # Buffer frame metadata (without raw bytes for memory efficiency)
+    # Buffer frame metadata along with a lightweight preview for sync replay.
     frame_meta = {
         "timestamp": packet.timestamp,
         "frame_id": packet.frame_id,
         "resolution": packet.resolution,
         "mode": packet.mode,
+        "data": packet.data,
     }
     buffers = get_buffers()
     buffers[session.session_id].add_frame_packet(frame_meta)
@@ -298,10 +371,13 @@ async def receive_frame(packet: CameraPacket):
             "sensor": "camera",
             "imu_count": session.stream_state.imu_packet_count,
             "frame_count": session.stream_state.frame_count,
+            "frame_id": packet.frame_id,
+            "data": packet.data,
+            "timestamp": packet.timestamp,
         },
     })
 
-    # Check if window is ready
-    await _try_process_window(session.session_id)
+    # Process any ready windows asynchronously so frame ingestion stays responsive.
+    _schedule_window_processing(session.session_id)
 
     return {"status": "ok", "session_id": session.session_id}

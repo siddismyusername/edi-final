@@ -376,11 +376,17 @@ class SyntheticSensorDataset(Dataset):
         dest = orig.copy()
         dest[1:-1] += np.random.uniform(-t * 0.1, t * 0.1, n_knots)
         dest = np.clip(dest, 0, t - 1)
+        dest[0] = 0.0
+        dest[-1] = t - 1
         dest = np.sort(dest)
+        dest = np.maximum.accumulate(dest)
+        dest[-1] = t - 1
         new_t = np.linspace(0, t - 1, t)
         warped = np.zeros_like(x)
         for dim in range(x.shape[1]):
-            warped[:, dim] = np.interp(new_t, dest, x[:, dim])
+            # Map output time back to source time, then sample the original signal.
+            source_t = np.interp(new_t, dest, orig)
+            warped[:, dim] = np.interp(source_t, np.arange(t), x[:, dim])
         return warped
 
     def _magnitude_scale(self, x: np.ndarray) -> np.ndarray:
@@ -422,6 +428,30 @@ class SyntheticSensorDataset(Dataset):
             torch.tensor(vis, dtype=torch.float32),
             torch.tensor(label, dtype=torch.long),
         )
+
+
+class AugmentingWrapper(Dataset):
+    """
+    Dataset wrapper to apply online augmentations dynamically
+    without mutating the underlying dataset's augment flag.
+    """
+    def __init__(self, subset: Subset, augment: bool):
+        self.subset = subset
+        self.augment = augment
+
+    def __len__(self) -> int:
+        return len(self.subset)
+
+    def __getitem__(self, idx: int):
+        imu_tensor, vis_tensor, label = self.subset[idx]
+        if self.augment:
+            base_dataset = self.subset.dataset
+            imu_np = imu_tensor.numpy()
+            vis_np = vis_tensor.numpy()
+            imu_np, vis_np = base_dataset._apply_augmentations(imu_np, vis_np)
+            imu_tensor = torch.tensor(imu_np, dtype=torch.float32)
+            vis_tensor = torch.tensor(vis_np, dtype=torch.float32)
+        return imu_tensor, vis_tensor, label
 
 
 # ──────────────────────────────────────────────────────────
@@ -765,18 +795,20 @@ def train(cfg: TrainConfig = CFG):
         t_visual=cfg.t_visual,
         noise_level=cfg.noise_level,
         max_async_delay=cfg.max_async_delay,
-        augment=True,
+        augment=False,
     )
 
-    train_set, val_set, test_set = stratified_split(
+    train_subset, val_subset, test_subset = stratified_split(
         full_dataset,
         cfg.train_frac,
         cfg.val_frac,
         cfg.seed,
     )
 
-    # Turn off augmentation for val/test
-    val_set.dataset.augment = False
+    # Wrap subsets to apply online augmentations dynamically
+    train_set = AugmentingWrapper(train_subset, augment=True)
+    val_set = AugmentingWrapper(val_subset, augment=False)
+    test_set = AugmentingWrapper(test_subset, augment=False)
 
     loader_kwargs = dict(
         batch_size=cfg.batch_size,

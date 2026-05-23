@@ -3,6 +3,20 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+class SyncPlaybackStatus {
+  const SyncPlaybackStatus({
+    required this.available,
+    required this.ready,
+    required this.availableSeconds,
+    required this.maxReplaySeconds,
+  });
+
+  final bool available;
+  final bool ready;
+  final double availableSeconds;
+  final double maxReplaySeconds;
+}
+
 /// Service responsible for API communication with the FastAPI server.
 class ApiService {
   // Singleton instance
@@ -16,6 +30,7 @@ class ApiService {
 
   String _serverUrl = '';
   bool _isConnected = false;
+  String? _currentSessionId;
   final _connectionStatusController = StreamController<bool>.broadcast();
 
   /// Gets the connection status stream
@@ -26,6 +41,29 @@ class ApiService {
 
   /// Gets the current server URL
   String get serverUrl => _serverUrl;
+
+  /// Gets the latest live session ID returned by the backend.
+  String? get currentSessionId => _currentSessionId;
+
+  void _captureSessionIdFromResponse(http.Response response) {
+    try {
+      if (response.body.isEmpty) {
+        return;
+      }
+
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map<String, dynamic>) {
+        final sessionId = decoded['session_id'];
+        if (sessionId is String && sessionId.isNotEmpty) {
+          _currentSessionId = sessionId;
+        }
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('[ApiService] Failed to parse session id: $e');
+      }
+    }
+  }
 
   /// Sets the server URL and tests the connection
   /// [url]: The base URL of the FastAPI server (e.g., "http://192.168.1.10:8000")
@@ -46,8 +84,13 @@ class ApiService {
         print(
             '[ApiService] Connection test: ${_isConnected ? 'SUCCESS' : 'FAILED'}');
       }
+
+      if (!_isConnected) {
+        _currentSessionId = null;
+      }
     } catch (e) {
       _isConnected = false;
+      _currentSessionId = null;
       if (kDebugMode) {
         print('[ApiService] Connection error: $e');
       }
@@ -77,7 +120,12 @@ class ApiService {
           .timeout(const Duration(seconds: 5));
 
       if (kDebugMode) {
-        print('[ApiService] IMU response: ${response.statusCode}');
+        print('[ApiService] IMU response: ${response.statusCode}'
+            '${response.statusCode >= 400 ? ' ${response.body}' : ''}');
+      }
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        _captureSessionIdFromResponse(response);
       }
 
       return response.statusCode == 200 || response.statusCode == 201;
@@ -109,7 +157,12 @@ class ApiService {
           .timeout(const Duration(seconds: 5));
 
       if (kDebugMode) {
-        print('[ApiService] Frame response: ${response.statusCode}');
+        print('[ApiService] Frame response: ${response.statusCode}'
+            '${response.statusCode >= 400 ? ' ${response.body}' : ''}');
+      }
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        _captureSessionIdFromResponse(response);
       }
 
       return response.statusCode == 200 || response.statusCode == 201;
@@ -150,29 +203,101 @@ class ApiService {
     }
   }
 
-  /// Checks whether the backend exposes the planned sync playback API.
-  Future<bool> isSyncPlaybackAvailable() async {
+  /// Checks whether sync playback is available for the current live session.
+  Future<SyncPlaybackStatus> getSyncPlaybackStatus({String? sessionId}) async {
     if (!_isConnected || _serverUrl.isEmpty) {
-      return false;
+      return const SyncPlaybackStatus(
+        available: false,
+        ready: false,
+        availableSeconds: 0,
+        maxReplaySeconds: 0,
+      );
     }
 
     try {
-      final response = await http
-          .get(
-            Uri.parse('$_serverUrl/sync/status'),
-          )
-          .timeout(const Duration(seconds: 5));
+      final uri = sessionId == null || sessionId.isEmpty
+          ? Uri.parse('$_serverUrl/sync/status')
+          : Uri.parse('$_serverUrl/sync/status?session_id=$sessionId');
+
+      final response = await http.get(uri).timeout(const Duration(seconds: 5));
 
       if (kDebugMode) {
         print('[ApiService] Sync status response: ${response.statusCode}');
       }
 
-      return response.statusCode == 200;
+      if (response.statusCode != 200) {
+        return const SyncPlaybackStatus(
+          available: false,
+          ready: false,
+          availableSeconds: 0,
+          maxReplaySeconds: 0,
+        );
+      }
+
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map<String, dynamic>) {
+        return SyncPlaybackStatus(
+          available: decoded['available'] as bool? ?? true,
+          ready: decoded['ready'] as bool? ?? false,
+          availableSeconds:
+              (decoded['available_seconds'] as num?)?.toDouble() ?? 0,
+          maxReplaySeconds:
+              (decoded['max_replay_seconds'] as num?)?.toDouble() ?? 0,
+        );
+      }
+
+      return const SyncPlaybackStatus(
+        available: true,
+        ready: false,
+        availableSeconds: 0,
+        maxReplaySeconds: 0,
+      );
     } catch (e) {
       if (kDebugMode) {
         print('[ApiService] Sync status unavailable: $e');
       }
-      return false;
+      return const SyncPlaybackStatus(
+        available: false,
+        ready: false,
+        availableSeconds: 0,
+        maxReplaySeconds: 0,
+      );
+    }
+  }
+
+  /// Fetches the latest fused replay snapshot for a session.
+  Future<Map<String, dynamic>?> getLatestSyncReplay({
+    required String sessionId,
+    double offsetSeconds = 0.0,
+  }) async {
+    if (!_isConnected || _serverUrl.isEmpty || sessionId.isEmpty) {
+      return null;
+    }
+
+    try {
+      final uri = Uri.parse(
+        '$_serverUrl/sync/latest?session_id=$sessionId&offset_seconds=$offsetSeconds',
+      );
+      final response = await http.get(uri).timeout(const Duration(seconds: 5));
+
+      if (kDebugMode) {
+        print('[ApiService] Sync latest response: ${response.statusCode}');
+      }
+
+      if (response.statusCode != 200) {
+        return null;
+      }
+
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map<String, dynamic>) {
+        return decoded;
+      }
+      return null;
+    } catch (e) {
+      if (kDebugMode) {
+        print('[ApiService] Sync latest unavailable: $e');
+      }
+      return null;
     }
   }
 

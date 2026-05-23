@@ -56,8 +56,18 @@ def get_artifact_store() -> ArtifactStore:
 def get_fusion_service():
     global _fusion_service
     if _fusion_service is None:
-        from app.services.fusion import FusionService
-        _fusion_service = FusionService()
+        try:
+            from app.services.fusion import FusionService
+            _fusion_service = FusionService()
+        except ModuleNotFoundError as exc:
+            if exc.name != "torch":
+                raise
+            logger.warning(
+                "PyTorch is not installed; using fallback NumPy fusion service. "
+                "Install backend/requirements.txt for trained model inference."
+            )
+            from app.services.fusion_fallback import FallbackFusionService
+            _fusion_service = FallbackFusionService()
     return _fusion_service
 
 
@@ -73,6 +83,23 @@ def get_sync_replay_cache() -> SyncReplayCache:
 
 def get_buffers() -> Dict[str, WindowBuffer]:
     return _buffers
+
+
+def cleanup_session_resources(session_id: str):
+    """Clean up resources associated with an expired session."""
+    logger.info(f"Cleaning up resources for expired session: {session_id}")
+    if session_id in _buffers:
+        try:
+            _buffers[session_id].clear()
+        except Exception as e:
+            logger.error(f"Error clearing buffer for session {session_id}: {e}")
+        del _buffers[session_id]
+
+    if _sync_replay_cache:
+        try:
+            _sync_replay_cache.clear_session(session_id)
+        except Exception as e:
+            logger.error(f"Error clearing replay cache for session {session_id}: {e}")
 
 
 # ── Application Lifecycle ───────────────────────────────────
@@ -95,16 +122,12 @@ async def lifespan(app: FastAPI):
     _session_manager = SessionManager(
         timeout_seconds=settings.session_timeout_seconds,
         max_sessions=settings.max_active_sessions,
+        on_expire=cleanup_session_resources,
     )
     _session_store = SessionStore(base_dir=settings.sessions_dir)
     _artifact_store = ArtifactStore(base_dir=settings.sessions_dir)
     _ws_manager = WebSocketManager()
     _sync_replay_cache = SyncReplayCache(max_seconds=settings.sync_replay_seconds)
-
-    # Lazy-load fusion service (loads PyTorch model)
-    logger.info("Initializing fusion service...")
-    get_fusion_service()
-    logger.info("Fusion service ready.")
 
     logger.info("ETA-Sync Backend ready. Waiting for connections...")
 

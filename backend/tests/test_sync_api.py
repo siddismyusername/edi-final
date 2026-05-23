@@ -34,6 +34,13 @@ def create_session(client: TestClient) -> str:
 
 
 class TestSyncEndpoints:
+    def test_status_without_session_reports_api_available(self, monkeypatch):
+        monkeypatch.setattr(app_main, "_fusion_service", object())
+        with TestClient(app) as client:
+            response = client.get("/sync/status")
+            assert response.status_code == 200
+            assert response.json()["available"] is True
+
     def test_status_not_ready_for_active_session(self, monkeypatch):
         monkeypatch.setattr(app_main, "_fusion_service", object())
         with TestClient(app) as client:

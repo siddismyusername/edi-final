@@ -7,7 +7,7 @@ void main() {
 
 /// Main application widget for ETA-Sync
 class ETASyncApp extends StatelessWidget {
-  const ETASyncApp({Key? key}) : super(key: key);
+  const ETASyncApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -35,8 +35,9 @@ class ETASyncApp extends StatelessWidget {
           color: colorScheme.surface,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(24),
-            side:
-                BorderSide(color: colorScheme.outlineVariant.withOpacity(0.7)),
+            side: BorderSide(
+              color: colorScheme.outlineVariant.withValues(alpha: 0.7),
+            ),
           ),
         ),
         textTheme: ThemeData.light().textTheme.copyWith(

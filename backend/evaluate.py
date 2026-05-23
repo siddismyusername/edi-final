@@ -24,7 +24,7 @@ import random
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List
 
 try:
@@ -163,7 +163,7 @@ def load_model(device, checkpoint_path: str | None = None):
     if not os.path.exists(cp):
         raise FileNotFoundError(f"Checkpoint missing: {cp}")
 
-    checkpoint = torch.load(cp, map_location=device)
+    checkpoint = torch.load(cp, map_location=device, weights_only=True)
 
     visual_encoder.load_state_dict(
         checkpoint["visual_encoder"]
@@ -484,7 +484,7 @@ def run_mock_evaluation(args, labels, reports_dir):
     jitters, jitter_accs = robustness_benchmark(accuracy)
 
     summary = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "device": "mock",
         "checkpoint": "mock",
         "checkpoint_epoch": None,
@@ -755,7 +755,7 @@ def evaluate(args):
     summary = {
 
         "timestamp":
-            datetime.utcnow().isoformat() + "Z",
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
 
         "device":
             (device_str if 'device_str' in locals() else (_settings.device if _settings is not None else "mock")),
